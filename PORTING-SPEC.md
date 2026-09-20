@@ -283,3 +283,11 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   edit re-rendered in the 5.17 env are BIT-IDENTICAL to the 5.14.1 renders (latent cos 1.000000,
   maxAbs 0) — the transformers floor on the model card changes nothing here; the 1024² halo is
   not a version artefact. fp32 probes (torch MPS, Swift `--fp32-dit`) are the last discriminator.
+- 2026-09-20 fp32 discriminator, Swift side (`--fp32-dit`, fp32 DiT + fp32 VAE, bf16 encoder,
+  same noise): the 1024² scarf edit is the SAME haloed near-copy (outputs/probe_scarf_fp32_swift.png)
+  — precision is ruled out. With cache, CFG, resolution, transformers version and dtype all
+  probed, the 1024²-edit degradation is a property of the reference pipeline's math/config for
+  that size (candidates for upstream: RoPE frame-axis offset between condition and target blocks
+  scaling with max(h, w); `calculate_shift` fed target-only tokens; target/condition resolution
+  coupling). Upstream report drafted: `qwen-image21-oracle/UPSTREAM-REPORT-1024-edit.md`.
+  fp32 DiT cost for the record: 18–23 s/step at 1024², peak 53.6 GB.
