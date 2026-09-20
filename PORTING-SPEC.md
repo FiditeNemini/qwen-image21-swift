@@ -268,3 +268,6 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   becomes a prerequisite the day an output cap rises) applies to this package on day one; a bf16
   decoder or the reference's `enable_tiling` (256-px tiles, 192 stride, blend) is the fix. Render
   coherent (`outputs/rel_t2i_2048.png`). Edit 1024² Release: 164.1 s wall / 40 steps.
+- 2026-09-20 CPU-stream DiT gate COMPLETE (GPU idle): 2-image layout block_31 relMax 7.6e-6,
+  target rows cos 1.0000000 relMax 6.5e-5, cached step 4.9e-5, cached-vs-uncached 7.0e-6 — all
+  three layouts CPU-exact; the earlier crashes on this case were the cross-process GPU watchdog.
