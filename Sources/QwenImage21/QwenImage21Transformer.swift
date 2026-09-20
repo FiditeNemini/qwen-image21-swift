@@ -497,6 +497,9 @@ public final class QwenImage21Transformer2DModel: Module {
     /// see qwen-image-edit-swift `chainBlockGraphs`). Off by default.
     public var chainBlockGraphs = false
 
+    /// The dtype the DiT computes in (its weights' dtype); the pipeline casts inputs to it.
+    public var computeDType: DType { imgIn.weight.dtype }
+
     /// Parity-gate tap: called with (blockIndex, blockOutput) after every block, and with
     /// (-1, joint input) / (-2, temb) / (-3, modulation) before the loop. nil in production.
     public var blockTap: ((Int, MLXArray) -> Void)?

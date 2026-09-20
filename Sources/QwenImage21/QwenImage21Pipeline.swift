@@ -168,7 +168,11 @@ public final class QwenImage21Generator {
         let neg = doCFG ? try encoderRef!.encode(prompt: negativePrompt!, images: resized) : nil
         if let neg { eval(pos.embeds, neg.embeds) } else { eval(pos.embeds) }
         evictEncoder(&encoderRef)
-        let dtype = pos.embeds.dtype
+        // Denoise in the DiT's own dtype (bf16 in production; fp32 for precision probes) — the
+        // encoder may run at a different precision.
+        let dtype = transformer.computeDType
+        let posEmbeds = pos.embeds.asType(dtype)
+        let negEmbeds = neg?.embeds.asType(dtype)
         try Task.checkCancellation()
 
         // 3. Condition latents (VAE mode, normalised, packed) + shapes; grid consistency check.
@@ -216,11 +220,11 @@ public final class QwenImage21Generator {
             let mode: QwenImage21KVCacheMode = cacheOn ? (i == 0 ? .extract : .cached) : .none
             let t = MLXArray([sigmas[i]])
             let hidden = condLatents.map { concatenated([$0, latents], axis: 1) } ?? latents
-            var v = transformer(hiddenStates: hidden, encoderHiddenStates: pos.embeds, timestep: t, layout: layout,
+            var v = transformer(hiddenStates: hidden, encoderHiddenStates: posEmbeds, timestep: t, layout: layout,
                                 kvCache: posCache, mode: mode)
             v = v[0..., (v.dim(1) - nTarget)...]
-            if let neg, let negLayout {
-                var nv = transformer(hiddenStates: hidden, encoderHiddenStates: neg.embeds, timestep: t, layout: negLayout,
+            if let negEmbeds, let negLayout {
+                var nv = transformer(hiddenStates: hidden, encoderHiddenStates: negEmbeds, timestep: t, layout: negLayout,
                                      kvCache: negCache, mode: mode)
                 nv = nv[0..., (nv.dim(1) - nTarget)...]
                 v = nv + trueCFGScale * (v - nv)

@@ -307,9 +307,10 @@ func generate(root: URL, qwenDir: URL) async throws {
         print("injected noise \(l.shape)")
     }
     let t0 = Date()
-    let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: .bfloat16)
-    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--fp32-vae") ? .float32 : .bfloat16)
-    print(String(format: "loaded DiT bf16 + VAE in %.1fs", Date().timeIntervalSince(t0)))
+    let ditDType: DType = has("--fp32-dit") ? .float32 : .bfloat16
+    let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: ditDType)
+    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--fp32-vae") || has("--fp32-dit") ? .float32 : .bfloat16)
+    print(String(format: "loaded DiT %@ + VAE in %.1fs", "\(ditDType)", Date().timeIntervalSince(t0)))
     let gen = QwenImage21Generator(
         encoderProvider: { try await QwenImage21PromptEncoder.load(qwenDir: qwenDir, dtype: .bfloat16) },
         transformer: tr, vae: vae, keepEncoderResident: has("--keep-encoder"))

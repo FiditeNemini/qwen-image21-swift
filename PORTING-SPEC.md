@@ -271,3 +271,11 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
 - 2026-09-20 CPU-stream DiT gate COMPLETE (GPU idle): 2-image layout block_31 relMax 7.6e-6,
   target rows cos 1.0000000 relMax 6.5e-5, cached step 4.9e-5, cached-vs-uncached 7.0e-6 — all
   three layouts CPU-exact; the earlier crashes on this case were the cross-process GPU watchdog.
+- 2026-09-20 Reference-side discriminators (torch/MPS bf16, natural photo, "Make the dog wear a
+  red scarf"; `qwen-image21-oracle/goldens/probe_scale_grid.png`): **output_resolution 512 and 768
+  → perfect edits** (scarf added, photo intact); 1024 → haloed near-copy, instruction ignored;
+  1024 with `use_kv_cache=False` → identical halo (not the cache); 1024 with true CFG 4 →
+  scarf appears but still haloed. So the reference degrades specifically at the 1024² edit size
+  (4,096 condition + 4,096 target tokens). Remaining suspect: bf16 precision at 8k tokens —
+  fp32 runs on both sides launched (`QI21_DTYPE=fp32`, `--fp32-dit`). Until resolved, the
+  package's edit surface should default `output_resolution` to 768.
