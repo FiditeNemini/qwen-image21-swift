@@ -279,3 +279,7 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   (4,096 condition + 4,096 target tokens). Remaining suspect: bf16 precision at 8k tokens —
   fp32 runs on both sides launched (`QI21_DTYPE=fp32`, `--fp32-dit`). Until resolved, the
   package's edit surface should default `output_resolution` to 768.
+- 2026-09-20 transformers 5.17.0 full-pipeline check: the 1024² scarf edit and the 320² beach
+  edit re-rendered in the 5.17 env are BIT-IDENTICAL to the 5.14.1 renders (latent cos 1.000000,
+  maxAbs 0) — the transformers floor on the model card changes nothing here; the 1024² halo is
+  not a version artefact. fp32 probes (torch MPS, Swift `--fp32-dit`) are the last discriminator.
