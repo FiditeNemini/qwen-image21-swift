@@ -221,3 +221,14 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   builds against mlx-engine-swift 0.56.0 (contract 1.42.0); offline gates green — manifest
   (licence outside the allowlist), MAT-1..5 across both repos, CAN-1..3 on both surfaces.
   Registry row added (mlx-engine-swift 784c9c3). Footprint still ESTIMATED.
+- 2026-09-20 E2E bf16 1024² EDIT (the T2I render as input, "Change the background to a sunset
+  beach", seed-42 noise injected on both sides): Swift vs torch final latents cos 0.99935, PSNR
+  36.3 dB — the port reproduces the reference at production scale for editing too. ⚠ Both outputs
+  are an over-sharpened, haloed copy of the input with the background unchanged: that is the
+  reference pipeline's own behaviour here (identical on torch), NOT a port defect. Whether it is
+  input/prompt-specific or a Day-0 `QwenImage21Pipeline` edit-path issue is being probed with a
+  natural-photo T2I→edit chain on the torch side (`run_photo_edit_probe.sh`).
+- 2026-09-20 E2E bf16 320² EDIT (synthetic img_a, same instruction, matched noise): Swift vs torch
+  cos 0.99973 / PSNR 35.1 dB and the edit is CORRECT on both sides (background → sunset beach with
+  palms, the circles and the "Qwen 2.1" text preserved; outputs/edit_320_side_by_side.png). So
+  the haloed 1024² result above is input/prompt-specific reference behaviour, not the edit path.

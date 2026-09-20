@@ -234,6 +234,52 @@ func gateDiT(root: URL, goldens: URL, only: String?) throws {
     }
 }
 
+/// Production-scale gate: the 1024² edit layout golden (dit_large_edit_1024), run at `dtype` on the
+/// current default device. bf16 on the GPU is the production regime — this is where a scale-only
+/// divergence (kernel windows, long-graph dispatch) shows up while the 320² fp32 gates stay exact.
+func gateDiTLarge(root: URL, goldens: URL, dtype: DType) throws {
+    let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: dtype)
+    print("transformer loaded (\(dtype))")
+    let g = try MLX.loadArrays(url: goldens.appendingPathComponent("dit_large_edit_1024.safetensors"))
+    let j = try loadJSON(goldens.appendingPathComponent("dit_large_edit_1024.json"))
+    let imgShapes = shapes(j["img_shapes"])
+    let sigmas = (j["sigmas"] as! [Double]).map { Float($0) }
+    let nTarget = j["n_target"] as! Int
+    let layout = try tr.buildLayout(imgMask: bools(g["img_mask"]!), imgShapes: imgShapes)
+    print("== dit_large_edit_1024: joint \(layout.jointLen) prefix \(layout.prefixLen) target \(layout.targetLen) segments \(layout.segments.map { "\($0.isText ? "T" : "I")\($0.start)-\($0.end)" })")
+    let pe = g["prompt_embeds"]![.newAxis].asType(dtype)
+    let hidden0 = concatenated([g["cond_latents_packed"]![.newAxis], g["latents_step0"]![.newAxis]], axis: 1).asType(dtype)
+    var taps: [Int: MLXArray] = [:]
+    tr.blockTap = { i, x in if [0, 15, 31].contains(i) { taps[i] = x } }
+    let cache = QwenImage21KVCache(numLayers: tr.numLayers)
+    let t0 = Date()
+    let out0 = tr(hiddenStates: hidden0, encoderHiddenStates: pe, timestep: MLXArray([sigmas[0]]), layout: layout, kvCache: cache, mode: .extract)
+    eval(out0)
+    print(String(format: "  extract forward %.1fs", Date().timeIntervalSince(t0)))
+    let gate: Float = dtype == .float32 ? 0.9999 : 0.995
+    let rel: Float = dtype == .float32 ? 2e-2 : 1.5e-1
+    for i in [0, 15, 31] {
+        report(String(format: "block_%02d (joint)", i), compare(taps[i]![0], g[String(format: "block_%02d", i)]!), cosGate: gate, relGate: rel)
+        report(String(format: "block_%02d (target rows)", i), compare(taps[i]![0, layout.prefixLen...], g[String(format: "block_%02d", i)]![layout.prefixLen...]), cosGate: gate, relGate: rel)
+    }
+    report("out_step0 target rows", compare(out0[0, layout.prefixLen...], g["out_step0_joint"]![layout.prefixLen...]), cosGate: gate, relGate: rel)
+    report("out_step0 prefix rows", compare(out0[0, ..<layout.prefixLen], g["out_step0_joint"]![..<layout.prefixLen]), cosGate: gate, relGate: rel)
+    report("kv cache L0 k", compare(cache.layers[0].k![0], g["kv_cache_layer0_k"]!), cosGate: gate, relGate: rel)
+    report("kv cache L31 k", compare(cache.layers[31].k![0], g["kv_cache_layer31_k"]!), cosGate: gate, relGate: rel)
+    tr.blockTap = nil
+    let hidden1 = concatenated([g["cond_latents_packed"]![.newAxis], g["latents_step1"]![.newAxis]], axis: 1).asType(dtype)
+    let t1 = Date()
+    let out1c = tr(hiddenStates: hidden1, encoderHiddenStates: pe, timestep: MLXArray([sigmas[1]]), layout: layout, kvCache: cache, mode: .cached)
+    eval(out1c)
+    print(String(format: "  cached forward %.1fs", Date().timeIntervalSince(t1)))
+    report("out_step1_cached", compare(out1c[0], g["out_step1_cached"]!), cosGate: gate, relGate: rel)
+    if has("--uncached") {
+        let out1u = tr(hiddenStates: hidden1, encoderHiddenStates: pe, timestep: MLXArray([sigmas[1]]), layout: layout, mode: .none)
+        eval(out1u)
+        report("cached vs uncached (ours)", compare(out1c[0], out1u[0, layout.prefixLen...]), cosGate: gate, relGate: rel)
+    }
+}
+
 func generate(root: URL, qwenDir: URL) async throws {
     let prompt = arg("--prompt") ?? "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement"
     let steps = Int(arg("--steps") ?? "40")!
@@ -309,6 +355,15 @@ do {
             try gateDiT(root: root, goldens: goldens, only: arg("--case"))
         } else {
             try Device.withDefaultDevice(.cpu) { try gateDiT(root: root, goldens: goldens, only: arg("--case")) }
+        }
+    } else if has("--dit-large") {
+        let root = URL(fileURLWithPath: arg("--dit-large")!)
+        let goldens = URL(fileURLWithPath: cli[cli.firstIndex(of: "--dit-large")! + 2])
+        let dtype: DType = has("--bf16") ? .bfloat16 : .float32
+        if has("--cpu") {
+            try Device.withDefaultDevice(.cpu) { try gateDiTLarge(root: root, goldens: goldens, dtype: dtype) }
+        } else {
+            try gateDiTLarge(root: root, goldens: goldens, dtype: dtype)
         }
     } else if has("--generate") {
         let root = URL(fileURLWithPath: arg("--generate")!)
