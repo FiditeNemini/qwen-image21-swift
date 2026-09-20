@@ -33,9 +33,16 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
     /// 1.0 — Qwen-Image-2.1 is meant to be sampled without guidance; > 1 with a negative prompt
     /// runs plain true CFG (two DiT forwards per step).
     public var defaultTrueCFGScale: Float
-    /// `output_resolution`: side length whose square is the output area (T2I default size, and
-    /// the area condition images are resized to). The model card recommends 2048 for T2I.
+    /// `output_resolution` for text-to-image: side length whose square is the output area. The
+    /// model card recommends 2048; 1024 keeps the VAE decode peak at ~31 GB (2048² decodes at 62 GB
+    /// until tiled decode lands, AB-T-0021).
     public var defaultOutputResolution: Int
+    /// `output_resolution` for EDITS (the area condition images are resized to and the output
+    /// follows). 768, NOT the reference's 1024: with diffusers main @80c7ed26 the reference itself
+    /// returns a haloed near-copy with the instruction ignored at 1024² (cache on or off) while
+    /// 512/768 edit cleanly (AB-R-0261); the port reproduces the reference, so it inherits this.
+    /// Revisit when the 1024² behaviour is understood (fp32 probes pending).
+    public var defaultEditOutputResolution: Int
     /// Keep the ~17 GB Qwen3-VL encoder resident between requests (big-RAM tiers).
     public var keepEncoderResident: Bool
     /// Prefix KV cache across denoise steps (the reference default).
@@ -57,6 +64,7 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
         defaultSteps: Int = 40,
         defaultTrueCFGScale: Float = 1.0,
         defaultOutputResolution: Int = 1024,
+        defaultEditOutputResolution: Int = 768,
         keepEncoderResident: Bool = false,
         useKVCache: Bool = true,
         modelsRootDirectory: URL? = nil
@@ -66,6 +74,7 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
         self.defaultSteps = defaultSteps
         self.defaultTrueCFGScale = defaultTrueCFGScale
         self.defaultOutputResolution = defaultOutputResolution
+        self.defaultEditOutputResolution = defaultEditOutputResolution
         self.keepEncoderResident = keepEncoderResident
         self.useKVCache = useKVCache
         self.modelsRootDirectory = modelsRootDirectory
@@ -126,7 +135,7 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
 
     private enum CodingKeys: String, CodingKey {
         case snapshotPath, textEncoderPath, defaultSteps, defaultTrueCFGScale, defaultOutputResolution,
-             keepEncoderResident, useKVCache
+             defaultEditOutputResolution, keepEncoderResident, useKVCache
     }
 }
 
@@ -185,7 +194,8 @@ public final class QwenImage21Package: ModelPackage {
                     summary: "Qwen-Image-2.1 instruction editing with up to 10 reference images "
                         + "(<image1>…<imageN> in the prompt), identity-preserving edits, transparent-layer "
                         + "editing and subject extraction; output follows the LAST image's aspect at "
-                        + "output_resolution² (default 1024²). RESEARCH LICENCE — non-commercial only.",
+                        + "output_resolution² (default 768² — the reference degrades at 1024², AB-R-0261). "
+                        + "RESEARCH LICENCE — non-commercial only.",
                     modes: []
                 ),
             ]
@@ -270,7 +280,8 @@ public final class QwenImage21Package: ModelPackage {
 
         let result = try await generator.generate(
             prompt: prompt, images: images, negativePrompt: negative, trueCFGScale: cfg,
-            width: width, height: height, outputResolution: configuration.defaultOutputResolution,
+            width: width, height: height,
+            outputResolution: images.isEmpty ? configuration.defaultOutputResolution : configuration.defaultEditOutputResolution,
             steps: steps, seed: seed, useKVCache: configuration.useKVCache,
             progress: { step, total in RunProgress.report(.denoise, step: step, totalSteps: total) })
 
