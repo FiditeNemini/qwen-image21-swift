@@ -246,3 +246,19 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   "dtype self-control" rule). Whole-tensor relMax is the wrong statistic at this scale; the gate
   should use per-row percentiles (todo). Forward times (Debug, GPU, contended): prefill 17.1 s
   bf16 / 22.5 s fp32, cached 10.2 s / 12.6 s.
+- 2026-09-20 Oracle-version check: the model card requires transformers ≥ 5.17 and the oracle
+  had 5.14.1; a second env (`.venv517`: transformers 5.17.0, same diffusers commit 80c7ed26)
+  reproduces the encoder goldens BIT-IDENTICALLY (maxAbs 0 on ids, position_ids, pixel_values
+  and pre-norm embeds for all four cases, incl. two images) — the Qwen3-VL rotary refactors
+  between the versions are numerically neutral here. Encoder goldens stand.
+- 2026-09-20 Reference-side edit probe (torch/MPS, 1024², natural photo from the model's own
+  T2I): "Change the background to a sunset beach" and "Make the dog wear a red scarf" BOTH return
+  the over-sharpened haloed near-copy with the instruction ignored
+  (`qwen-image21-oracle/goldens/probe_side_by_side.png`), while the 320² edit is correct. This is
+  systematic reference behaviour at 1024² under diffusers main @ 80c7ed26 (defaults: KV cache on,
+  no CFG, 40 steps). Discriminators queued: cache off, output_resolution 512/768, true CFG 4.
+  No upstream fix or report yet (issues #14804/#14817/#14820/#14821 are features, not this).
+- 2026-09-20 Release timing (uncontended GPU, Debug→Release binary): T2I 1024²/40 steps 128.4 s
+  wall, sustained **3.0–3.5 s/step**, peak 31.2 GB (torch MPS bf16: 80 s / ~2 s/step on the same
+  box → ~1.5× headroom: fp32 RoPE cast path, modulation slice/concat, 5-way NAX chunk at 4096
+  rows are the suspects). Edit 1024²: prefill 11.5 s (8.2k tokens), cached steps ~3.6 s.
