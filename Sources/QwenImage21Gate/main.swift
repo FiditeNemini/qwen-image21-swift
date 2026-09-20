@@ -14,6 +14,8 @@ import Foundation
 import MLX
 import QwenImage21
 
+setbuf(stdout, nil)  // line-by-line logs when redirected to a file
+
 // MARK: - helpers
 
 struct Cmp { let cos: Float; let maxAbs: Float; let relMax: Float; let shape: [Int] }
@@ -112,7 +114,7 @@ func gateVAE(root: URL, goldens: URL) throws {
         eval(dec)
         report("\(name) decode", compare(dec[0], g["decoded_rgba"]!))
         // VAE-input construction from the golden PNG (exact bytes expected)
-        let caseName = name == "vae_img_a" ? "encoder_edit_1img_img_a" : "encoder_edit_2img_img_b"
+        let caseName = name == "vae_img_a" ? "edit_1img_img_a" : "edit_2img_img_b"
         let png = try QwenImage21PNG.read(url: goldens.appendingPathComponent("\(caseName)_resized_rgba.png"))
         let ours = MLXArray(png.vaePixelsCHW(), [4, 1, png.height, png.width])
         report("\(name) png->vae pixels", compare(ours, g["pixels_rgba"]!), cosGate: 0.999999, relGate: 1e-6)
@@ -124,7 +126,7 @@ func gateVAE(root: URL, goldens: URL) throws {
 }
 
 func gateResize(goldens: URL) throws {
-    for (orig, resizedName, w, h) in [("img_a", "encoder_edit_1img_img_a", 320, 320), ("img_b", "encoder_edit_2img_img_b", 288, 384)] {
+    for (orig, resizedName, w, h) in [("img_a", "edit_1img_img_a", 320, 320), ("img_b", "edit_2img_img_b", 288, 384)] {
         let src = try QwenImage21PNG.read(url: goldens.appendingPathComponent("\(orig).png"))
         let ref = try QwenImage21PNG.read(url: goldens.appendingPathComponent("\(resizedName)_resized_rgba.png"))
         let ours = QwenImage21PILResize.resizeRGBA(src, outWidth: w, outHeight: h)
@@ -154,7 +156,7 @@ func gateEncoder(qwenDir: URL, goldens: URL, tokenizerDir: URL?) async throws {
         var images: [QwenImage21RGBAImage] = []
         let imgNames = name == "encoder_edit_1img" ? ["img_a"] : name == "encoder_edit_2img" ? ["img_a", "img_b"] : []
         for (i, n) in imgNames.enumerated() {
-            let png = try QwenImage21PNG.read(url: goldens.appendingPathComponent("\(name)_\(n)_resized_rgba.png"))
+            let png = try QwenImage21PNG.read(url: goldens.appendingPathComponent("\(name.replacingOccurrences(of: "encoder_", with: ""))_\(n)_resized_rgba.png"))
             precondition(png.width == sizes[i][0] && png.height == sizes[i][1])
             images.append(png)
         }
@@ -241,6 +243,16 @@ func generate(root: URL, qwenDir: URL) async throws {
     let cfg = Float(arg("--cfg") ?? "1")!
     let outPath = arg("--out") ?? "qwen-image-2.1.png"
     let images = try args("--image").map { try QwenImage21PNG.read(url: URL(fileURLWithPath: $0)) }
+    // `--latents file.safetensors` injects the reference's initial noise (key `latents_packed`, [1, hw, 64]
+    // or [hw, 64]) so a render can be compared numerically with a torch run despite the RNG mismatch.
+    var injected: MLXArray? = nil
+    if let lp = arg("--latents") {
+        let d = try MLX.loadArrays(url: URL(fileURLWithPath: lp))
+        var l = d["latents_packed"] ?? d.values.first!
+        if l.ndim == 2 { l = l[.newAxis] }
+        injected = l
+        print("injected noise \(l.shape)")
+    }
     let t0 = Date()
     let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: .bfloat16)
     let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--fp32-vae") ? .float32 : .bfloat16)
@@ -253,6 +265,7 @@ func generate(root: URL, qwenDir: URL) async throws {
     let r = try await gen.generate(
         prompt: prompt, images: images, negativePrompt: arg("--neg"), trueCFGScale: cfg,
         width: size, height: size, outputResolution: outRes, steps: steps, seed: seed, useKVCache: !has("--no-cache"),
+        latents: injected,
         progress: { i, n in
             let now = Date()
             print(String(format: "  step %d/%d  %.2fs  peak %.1f GB", i, n, now.timeIntervalSince(last), Double(Memory.peakMemory) / 1e9))
@@ -262,6 +275,10 @@ func generate(root: URL, qwenDir: URL) async throws {
                  Date().timeIntervalSince(t1), steps, has("--no-cache") ? "off" : "on", Double(Memory.peakMemory) / 1e9))
     try QwenImage21PNG.write(r.image, to: URL(fileURLWithPath: outPath))
     print("wrote \(outPath)")
+    if let sl = arg("--save-latents") {
+        try MLX.save(arrays: ["latents_packed": r.latentsPacked.asType(.float32)], url: URL(fileURLWithPath: sl))
+        print("saved final latents to \(sl)")
+    }
 }
 
 // MARK: - main
@@ -287,7 +304,12 @@ do {
     } else if has("--dit") {
         let root = URL(fileURLWithPath: arg("--dit")!)
         let goldens = URL(fileURLWithPath: cli[cli.firstIndex(of: "--dit")! + 2])
-        try Device.withDefaultDevice(.cpu) { try gateDiT(root: root, goldens: goldens, only: arg("--case")) }
+        if has("--gpu") {
+            print("DiT gate on the GPU stream (fp32; expect ~1e-3 GPU accumulation noise vs the CPU goldens)")
+            try gateDiT(root: root, goldens: goldens, only: arg("--case"))
+        } else {
+            try Device.withDefaultDevice(.cpu) { try gateDiT(root: root, goldens: goldens, only: arg("--case")) }
+        }
     } else if has("--generate") {
         let root = URL(fileURLWithPath: arg("--generate")!)
         let q = URL(fileURLWithPath: cli[cli.firstIndex(of: "--generate")! + 2])

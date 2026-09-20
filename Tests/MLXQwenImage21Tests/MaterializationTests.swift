@@ -1,0 +1,45 @@
+// MAT gate (offline) — two repos: the 2.1 snapshot and the stock Qwen3-VL-8B-Instruct conditioner.
+import Foundation
+import MLXServeConformance
+import MLXToolKit
+import XCTest
+
+@testable import MLXQwenImage21
+
+final class QwenImage21MaterializationTests: XCTestCase {
+    static let localSnapshot = "/Volumes/Satechi/Development/mlxengine-image/weights/Qwen-Image-2.1"
+    static let localTextEncoder = "/Volumes/Satechi/Development/mlxengine-image/weights/Qwen3-VL-8B-Instruct"
+
+    func testMATGate() {
+        let fresh = QwenImage21Configuration()
+        let haveLocal = FileManager.default.fileExists(atPath: Self.localSnapshot + "/transformer")
+            && FileManager.default.fileExists(atPath: Self.localTextEncoder + "/config.json")
+        let satisfied = QwenImage21Configuration(snapshotPath: Self.localSnapshot, textEncoderPath: Self.localTextEncoder)
+        let report = MaterializationConformance.check(
+            freshConfiguration: fresh, satisfiedConfiguration: haveLocal ? satisfied : nil)
+        XCTAssertTrue(report.passed, report.summary)
+    }
+
+    func testWeightSourcesCoverBothRepos() {
+        let cfg = QwenImage21Configuration()
+        XCTAssertEqual(Set(cfg.weightSources.map(\.role)), ["transformer", "vae", "pipeline-config", "text-encoder"])
+        XCTAssertEqual(Set(cfg.weightSources.map(\.repo)),
+                       [QwenImage21Configuration.repo, QwenImage21Configuration.textEncoderRepo])
+        let globs = cfg.weightSources.flatMap { $0.matching ?? [] }
+        XCTAssertTrue(globs.contains("processor/*"))  // tokenizer + preprocessor config for the prompt encoder
+        XCTAssertTrue(globs.contains("transformer/*"))
+        XCTAssertTrue(globs.contains("vae/*"))
+        XCTAssertTrue(globs.contains("*.safetensors"))
+    }
+
+    func testExplicitPathsSatisfyTheirOwnRepoOnly() {
+        let tmp = URL(fileURLWithPath: NSTemporaryDirectory()).appendingPathComponent("qi21-mat-probe")
+        try? FileManager.default.createDirectory(at: tmp.appendingPathComponent("transformer"), withIntermediateDirectories: true)
+        let pinned = QwenImage21Configuration(snapshotPath: tmp.path)
+        let missing = pinned.missingWeightSources(storeRoot: nil)
+        XCTAssertFalse(missing.contains { $0.repo == QwenImage21Configuration.repo })
+        XCTAssertTrue(missing.contains { $0.repo == QwenImage21Configuration.textEncoderRepo })
+        XCTAssertEqual(pinned.resolvedSnapshotDirectory(storeRoot: nil)?.lastPathComponent, "qi21-mat-probe")
+        XCTAssertFalse(QwenImage21Configuration().missingWeightSources(storeRoot: nil).isEmpty)
+    }
+}

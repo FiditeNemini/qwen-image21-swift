@@ -200,9 +200,23 @@ public enum QwenImage21PILResize {
 public enum QwenImage21PNG {
     /// Decode a PNG/JPEG file to straight (non-premultiplied) RGBA8.
     public static func read(url: URL) throws -> QwenImage21RGBAImage {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
-        else { throw QwenImage21Error.invalidInput("cannot decode image at \(url.path)") }
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
+            throw QwenImage21Error.invalidInput("cannot open image at \(url.path)")
+        }
+        return try read(source: src, label: url.path)
+    }
+
+    /// Decode in-memory PNG/JPEG data to straight RGBA8.
+    public static func read(data: Data) throws -> QwenImage21RGBAImage {
+        guard let src = CGImageSourceCreateWithData(data as CFData, nil) else {
+            throw QwenImage21Error.invalidInput("cannot decode image data (\(data.count) bytes)")
+        }
+        return try read(source: src, label: "<data>")
+    }
+
+    static func read(source src: CGImageSource, label: String) throws -> QwenImage21RGBAImage {
+        guard let cg = CGImageSourceCreateImageAtIndex(src, 0, [kCGImageSourceShouldCache: false] as CFDictionary)
+        else { throw QwenImage21Error.invalidInput("cannot decode image at \(label)") }
         let w = cg.width, h = cg.height
         // Draw into a premultiplied context is lossy for translucent pixels, so read the decoded
         // bytes directly when they are already 8-bit RGBA/RGB.
@@ -257,18 +271,34 @@ public enum QwenImage21PNG {
         return QwenImage21RGBAImage(rgba: out, width: w, height: h)
     }
 
-    /// Write straight RGBA8 as a PNG (alpha preserved).
-    public static func write(_ image: QwenImage21RGBAImage, to url: URL) throws {
-        let cs = CGColorSpaceCreateDeviceRGB()
-        let data = Data(image.rgba)
-        guard let provider = CGDataProvider(data: data as CFData),
+    static func cgImage(_ image: QwenImage21RGBAImage) throws -> CGImage {
+        let cs = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
+        guard let provider = CGDataProvider(data: Data(image.rgba) as CFData),
               let cg = CGImage(width: image.width, height: image.height, bitsPerComponent: 8, bitsPerPixel: 32,
                                bytesPerRow: image.width * 4, space: cs,
                                bitmapInfo: CGBitmapInfo(rawValue: CGImageAlphaInfo.last.rawValue),
-                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent),
-              let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
-        else { throw QwenImage21Error.invalidInput("cannot encode PNG") }
+                               provider: provider, decode: nil, shouldInterpolate: false, intent: .defaultIntent)
+        else { throw QwenImage21Error.invalidInput("cannot build CGImage") }
+        return cg
+    }
+
+    /// Write straight RGBA8 as a PNG (alpha preserved).
+    public static func write(_ image: QwenImage21RGBAImage, to url: URL) throws {
+        let cg = try cgImage(image)
+        guard let dest = CGImageDestinationCreateWithURL(url as CFURL, UTType.png.identifier as CFString, 1, nil)
+        else { throw QwenImage21Error.invalidInput("cannot create PNG destination") }
         CGImageDestinationAddImage(dest, cg, nil)
         guard CGImageDestinationFinalize(dest) else { throw QwenImage21Error.invalidInput("PNG write failed: \(url.path)") }
+    }
+
+    /// Straight RGBA8 -> PNG bytes (alpha preserved) — the engine's canonical image artifact.
+    public static func pngData(_ image: QwenImage21RGBAImage) throws -> Data {
+        let cg = try cgImage(image)
+        let out = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(out, UTType.png.identifier as CFString, 1, nil)
+        else { throw QwenImage21Error.invalidInput("cannot create PNG destination") }
+        CGImageDestinationAddImage(dest, cg, nil)
+        guard CGImageDestinationFinalize(dest) else { throw QwenImage21Error.invalidInput("PNG encode failed") }
+        return out as Data
     }
 }

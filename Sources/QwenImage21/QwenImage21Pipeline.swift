@@ -108,6 +108,24 @@ public final class QwenImage21Generator {
         Memory.clearCache()
     }
 
+    /// Build the first-forward graphs at load time (a 256² T2I DiT step + VAE decode) so the
+    /// first request does not pay kernel/graph build. The encoder is deliberately not warmed —
+    /// it loads per request.
+    public func warmup() {
+        let dtype: DType = .bfloat16
+        let side = 256
+        let lh = side / 16
+        let txt = MLXArray.zeros([1, 16, 4096]).asType(dtype)
+        let slots = [Bool](repeating: false, count: 16) + [Bool](repeating: true, count: lh * lh / 4)
+        guard let layout = try? transformer.buildLayout(imgMask: slots, imgShapes: [(1, lh, lh)]) else { return }
+        let latents = MLXArray.zeros([1, lh * lh, 64]).asType(dtype)
+        let v = transformer(hiddenStates: latents, encoderHiddenStates: txt, timestep: MLXArray([Float(1)]), layout: layout, mode: .none)
+        let unpacked = QwenImage21Latents.unpack(v[0..., (v.dim(1) - lh * lh)...].asType(vae.weightDtype), pixelHeight: side, pixelWidth: side)
+        let decoded = vae.decode(AutoencoderKLQwenImage21.deNormalize(unpacked))
+        eval(decoded)
+        Memory.clearCache()
+    }
+
     public struct Result {
         public let image: QwenImage21RGBAImage
         public let latentsPacked: MLXArray

@@ -201,3 +201,23 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   path dependency until the tag ships (fleet sweep flags path deps — temporary by design).
 - 2026-09-20 Oracle goldens at `output_resolution=320` (not 256) because of the min_pixels
   grid-coupling edge (§2.2).
+- 2026-09-20 First DiT gate: T2I layout green, edit layouts cos 0.53 at block 0 → the joint gather
+  addressed image tokens at `text-positions + i`; the encoder tensor still holds the VL pad rows,
+  so images live at `T + i` (reference: cat → repeat_interleave → overwrite). Fixed; all three
+  layouts green on target rows (AB-R receipts). Per-block goldens made it a one-run diagnosis.
+
+## 9. Gate results (running log)
+
+- 2026-09-20 sched/attn-probe/resize/vae/encoder: green (AB-R-0253). DiT GPU fp32: green on
+  target rows, prefill, KV cache, cached + uncached steps for all layouts; 2-image prefix rows
+  relMax 3.9e-2 at cos 0.99999 (GPU noise, CPU run pending).
+- 2026-09-20 CPU-stream DiT gate: T2I and 1-image layouts target rows cos 1.0000001, relMax ≤7e-6
+  (prefill, KV cache, cached and uncached steps all within 1e-5 relative) — bit-level parity.
+- 2026-09-20 E2E bf16, 1024², 40 steps, the reference's own seed-42 noise injected: Swift (MLX
+  GPU) vs torch (MPS) final latents cos 0.99933, PSNR 36.5 dB RGB, visually identical (the neon
+  "QWEN IMAGE 2.1" sign renders legibly in both). Debug build 3.8–10 s/step under contention
+  (torch render + CPU gate concurrently); Release sustained timing owed (AB-L-0063).
+- 2026-09-20 Engine wrapper `MLXQwenImage21` (PackageID qwen-image-2.1, textToImage + imageEdit):
+  builds against mlx-engine-swift 0.56.0 (contract 1.42.0); offline gates green — manifest
+  (licence outside the allowlist), MAT-1..5 across both repos, CAN-1..3 on both surfaces.
+  Registry row added (mlx-engine-swift 784c9c3). Footprint still ESTIMATED.

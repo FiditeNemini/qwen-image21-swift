@@ -266,8 +266,10 @@ public struct QwenImage21Layout {
     public let imgShapes: [(Int, Int, Int)]
     /// Joint-sequence mask, `true` at latent-token positions (each VL image slot -> 2x2 tokens).
     public let imagePadMask: [Bool]
-    /// Joint index -> source index into `[text ‖ image]` (text first, then packed latents).
+    /// Joint index -> source index into `[text ‖ image]` (the T encoder rows first, then packed latents).
     public let gatherIndex: [Int32]
+    /// T — the encoder rows (after drop_idx), i.e. the VL slots before the appended target slots.
+    public let encoderLen: Int
     /// Number of joint tokens before the target image block.
     public let prefixLen: Int
     /// Target-image token count (the trailing block).
@@ -549,29 +551,40 @@ public final class QwenImage21Transformer2DModel: Module {
             throw QwenImage21Error.invalidInput(
                 "img_shapes account for \(blockLengths.reduce(0, +)) image tokens but the mask marks \(imageCount)")
         }
-        // image ids + gather index
+        // image ids + gather index. The reference builds the joint sequence as
+        // `cat([encoder_hidden_states (T rows, INCLUDING the VL pad rows), zeros(target slots)])`
+        // expanded 4x at image slots and then OVERWRITES every image position with the packed
+        // latents — so a text position reads its own VL slot row (slot index < T), and the i-th
+        // image position (sequence order) reads packed-latent row i, addressed at T + i in the
+        // `[text ‖ image]` source. (Indexing images at `number-of-text-positions + i` was the
+        // first port's bug: correct only when the prompt has no image pads, i.e. T2I.)
+        let targetLen = blockLengths.last ?? 0
+        let encoderLen = imgMask.count - targetLen / 4  // T: VL rows before the appended target slots
         var imageIds = [Int](repeating: -1, count: total)
         var gather = [Int32](repeating: 0, count: total)
-        var textIdx: Int32 = 0
         var imgIdx: Int32 = 0
-        let textCount = Int32(total - imageCount)
         var block = 0
         var remainingInBlock = blockLengths.isEmpty ? 0 : blockLengths[0]
-        for i in 0..<total {
-            if imagePadMask[i] {
-                while remainingInBlock == 0, block + 1 < blockLengths.count {
-                    block += 1; remainingInBlock = blockLengths[block]
+        var pos = 0
+        for (slot, isImage) in imgMask.enumerated() {
+            if isImage {
+                for _ in 0..<4 {
+                    while remainingInBlock == 0, block + 1 < blockLengths.count {
+                        block += 1; remainingInBlock = blockLengths[block]
+                    }
+                    imageIds[pos] = block
+                    remainingInBlock -= 1
+                    gather[pos] = Int32(encoderLen) + imgIdx
+                    imgIdx += 1
+                    pos += 1
                 }
-                imageIds[i] = block
-                remainingInBlock -= 1
-                gather[i] = textCount + imgIdx
-                imgIdx += 1
             } else {
-                gather[i] = textIdx
-                textIdx += 1
+                precondition(slot < encoderLen, "text slot beyond the encoder rows")
+                gather[pos] = Int32(slot)
+                pos += 1
             }
         }
-        let targetLen = blockLengths.last ?? 0
+        precondition(pos == total)
         let prefixLen = total - targetLen
         // the target block must be the trailing run (the pipeline appends its slots last)
         for i in prefixLen..<total where imageIds[i] != blockLengths.count - 1 {
@@ -587,7 +600,7 @@ public final class QwenImage21Transformer2DModel: Module {
         }
         let (c, s) = posEmbed(imgShapes: imgShapes, imagePadMask: imagePadMask)
         return QwenImage21Layout(
-            imgShapes: imgShapes, imagePadMask: imagePadMask, gatherIndex: gather,
+            imgShapes: imgShapes, imagePadMask: imagePadMask, gatherIndex: gather, encoderLen: encoderLen,
             prefixLen: prefixLen, targetLen: targetLen, segments: segments, cos: c, sin: s)
     }
 
@@ -626,6 +639,10 @@ public final class QwenImage21Transformer2DModel: Module {
         } else {
             let img = imgIn(hiddenStates)                 // [1, L_img, D]
             let txt = txtIn(encoderHiddenStates)          // [1, T, D]
+            precondition(
+                txt.dim(1) + img.dim(1) == layout.encoderLen + layout.imgShapes.reduce(0) { $0 + $1.0 * $1.1 * $1.2 }
+                    && txt.dim(1) == layout.encoderLen,
+                "encoder rows \(txt.dim(1)) / image tokens \(img.dim(1)) do not match the layout (T = \(layout.encoderLen))")
             let source = concatenated([txt, img], axis: 1)
             joint = take(source, MLXArray(layout.gatherIndex), axis: 1)
             prefixLen = causalCondition ? layout.prefixLen : 0

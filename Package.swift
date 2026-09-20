@@ -13,6 +13,9 @@ let package = Package(
     platforms: [.macOS(.v26)],
     products: [
         .library(name: "QwenImage21", targets: ["QwenImage21"]),
+        // MLXEngine wrapper: textToImage + imageEdit on one core (PackageID qwen-image-2.1).
+        // C7 = LicenseRef-Qwen-Research (package-local, never allowlisted) — research tier.
+        .library(name: "MLXQwenImage21", targets: ["MLXQwenImage21"]),
         .executable(name: "QwenImage21Gate", targets: ["QwenImage21Gate"]),
     ],
     dependencies: [
@@ -23,6 +26,8 @@ let package = Package(
         // (lastHiddenState(applyFinalNorm:)) is unreleased; flip to the tagged URL
         // (xocialize/qwen3vl-mlx-swift ≥ 0.3.0) once it ships — the fleet sweep flags path deps.
         .package(path: "../../../mlxengine-think/PROD/qwen3vl-mlx-swift"),
+        // MLXEngine contract (MLXToolKit) + the executable MAT/CAN gates, for the wrapper only.
+        .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.56.0"),
     ],
     targets: [
         .target(
@@ -39,6 +44,15 @@ let package = Package(
             ],
             path: "Sources/QwenImage21"
         ),
+        .target(
+            name: "MLXQwenImage21",
+            dependencies: [
+                "QwenImage21",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXToolKit", package: "mlx-engine-swift"),
+            ],
+            path: "Sources/MLXQwenImage21"
+        ),
         .executableTarget(
             name: "QwenImage21Gate",
             dependencies: ["QwenImage21", .product(name: "MLX", package: "mlx-swift")],
@@ -48,6 +62,14 @@ let package = Package(
             name: "QwenImage21Tests",
             dependencies: ["QwenImage21", .product(name: "MLX", package: "mlx-swift")],
             path: "Tests/QwenImage21Tests"
+        ),
+        .testTarget(
+            name: "MLXQwenImage21Tests",
+            dependencies: [
+                "MLXQwenImage21",
+                .product(name: "MLXServeConformance", package: "mlx-engine-swift"),
+            ],
+            path: "Tests/MLXQwenImage21Tests"
         ),
     ]
 )
