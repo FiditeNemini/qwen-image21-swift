@@ -278,6 +278,13 @@ func gateDiTLarge(root: URL, goldens: URL, dtype: DType) throws {
         eval(out1u)
         report("cached vs uncached (ours)", compare(out1c[0], out1u[0, layout.prefixLen...]), cosGate: gate, relGate: rel)
     }
+    if let dump = arg("--dump") {
+        try MLX.save(arrays: [
+            "out_step0_joint": out0[0].asType(.float32), "out_step1_cached": out1c[0].asType(.float32),
+            "block_15": taps[15]![0].asType(.float32), "block_31": taps[31]![0].asType(.float32),
+        ], url: URL(fileURLWithPath: dump))
+        print("dumped to \(dump)")
+    }
 }
 
 func generate(root: URL, qwenDir: URL) async throws {

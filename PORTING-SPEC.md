@@ -232,3 +232,17 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   cos 0.99973 / PSNR 35.1 dB and the edit is CORRECT on both sides (background → sunset beach with
   palms, the circles and the "Qwen 2.1" text preserved; outputs/edit_320_side_by_side.png). So
   the haloed 1024² result above is input/prompt-specific reference behaviour, not the edit path.
+- 2026-09-20 CPU-stream gate note: the first CPU run crashed on the 2-image layout with a Metal
+  command-buffer timeout (`kIOGPUCommandBufferCallbackErrorTimeout`) while three GPU renders were
+  running concurrently — the Metal-watchdog family; the T2I and 1-image layouts had already
+  passed at relMax ≤ 1e-5. Re-run of that case queued uncontended.
+- 2026-09-20 PRODUCTION-SCALE DiT gate (`--dit-large`, 1024² edit: 8,213 joint / 4,117 prefix /
+  4,096 target tokens, golden fp32 CPU torch): fp32 GPU step-0 target rows median per-token cos
+  0.9999964, 17/4,096 tokens above relMax 2e-2 (worst cos 0.976 at grid spots (8–9, 39–40) and
+  (60, 13)); step-1 cached 0/4,096 tokens above 2e-2, min row cos 0.9998; KV cache L0/L31 cos
+  0.9999999 / 0.9999987. bf16 GPU: median row cos 0.99990, 497 tokens above 2e-2. **Self-control:**
+  our bf16 vs our fp32 disagrees on 522 tokens with the SAME worst rows (552, 3853, 591, 623, 392)
+  — the outliers are precision-sensitive tokens, not a scale-dependent port defect (mlx-porting
+  "dtype self-control" rule). Whole-tensor relMax is the wrong statistic at this scale; the gate
+  should use per-row percentiles (todo). Forward times (Debug, GPU, contended): prefill 17.1 s
+  bf16 / 22.5 s fp32, cached 10.2 s / 12.6 s.
