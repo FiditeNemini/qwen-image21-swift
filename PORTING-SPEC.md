@@ -1,0 +1,203 @@
+# qwen-image21-swift — Porting spec: Qwen-Image-2.1 → Swift/MLX
+
+Status: **WIP port, research/evaluation licence** (see §1). Started 2026-09-20 (release day).
+Reference = diffusers **main** `QwenImage21Pipeline` (huggingface/diffusers#14804, Day-0),
+transformers 5.14 `Qwen3VLForConditionalGeneration`. Oracle + goldens:
+`mlxengine-image/WIP/qwen-image21-oracle` (`make_goldens.py`, fp32 CPU torch).
+Upstream model card: https://huggingface.co/Qwen/Qwen-Image-2.1 · code: github.com/QwenLM/Qwen-Image-2.1.
+
+## 0. What "update to 2.1" actually is
+
+Qwen-Image-2.1 is **not a checkpoint bump** of the 2511 family our `qwen-image-edit-swift`
+serves. Every component changed:
+
+| | Qwen-Image / Edit-2511 (`PROD/qwen-image-edit-swift`) | **Qwen-Image-2.1** |
+|---|---|---|
+| DiT | 20B, 60 **dual**-stream MMDiT blocks, hidden 3072, GELU FFN 4×, per-block img/txt modulation (6 params), biases everywhere | **7B, 32 single-stream blocks**, hidden 4096 (32 heads × 128), **SwiGLU** FFN 3× (12288), **one shared modulation** linear (4096→16384 = scale/gate ×2) for all blocks, **tanh-squashed gates**, **no biases anywhere** |
+| Attention | joint [text, image] full attention (+ text padding mask) | **block-causal**: `(q ≥ k) ∨ same_image_block` — text strictly causal, every image block bidirectional, target sees everything; **prefix KV cache** across denoise steps |
+| Conditioning tokens | text stream separate; cond-image latents concatenated after target on the image stream | **one interleaved sequence**: cond-image latent tokens are *substituted* at the VL `<|image_pad|>` slots (1 slot → 2×2 latents), target tokens appended; text/cond modulate from **t = 0** (`causal_condition`) |
+| Text encoder | Qwen2.5-VL-7B, `hidden_states[-1]` **post**-norm, 3584-d | **Qwen3-VL-8B** (byte-identical to `Qwen/Qwen3-VL-8B-Instruct`, §3), last layer **PRE-final-norm**, 4096-d, real 3-D M-RoPE positions |
+| VAE | Wan2.1 3-D causal, 16-ch, 8× spatial, RGB | **Wan2.2-style residual** (AvgDown3D/DupUp3D shortcuts), **64-ch, 16× spatial**, **RGBA** in/out, plain 2-D convs (image specialisation), fp32 checkpoint |
+| Latent packing | 2×2 patchify → 64-ch tokens (patch_size 2) | **patch_size 1**: plain spatial flatten, 64-ch tokens; size multiple of **32** |
+| Scheduler | FlowMatchEuler dyn-shift (256/4096, 0.5/1.15); Flash static shift 3 | FlowMatchEuler dyn-shift **(256/8192, 0.5/0.9)** + **shift_terminal 0.02** |
+| Guidance | true CFG 4.0 (norm-rescaled) | **none by default** (true_cfg_scale 1.0); plain CFG if enabled |
+| Default output | 1024² (edit follows the first image) | **native 2048²** T2I; edit follows the **last** image at `output_resolution`² (default 1024) |
+| Steps | 20–50 | **40** |
+| Extras | LoRA (Lightning/TeleStyle), int4/int8, FireRed swap | native transparency (RGBA prompt format), ≤10 reference images, mask/circle-guided edits; PE prompt-rewriter models (Qwen3.5-VL-9B, separate repos) |
+| Licence | **Apache-2.0** | **Qwen RESEARCH License — non-commercial only** |
+
+So the work is a **new port** (new package, new core), not an update of the existing one.
+What carries over: the fleet's Qwen3-VL Swift backbone, the Wan-VAE block idioms, the residency /
+cancellation / loader conventions, and the NAX workaround.
+
+## 1. Licence — the gate that decides where this can go
+
+`Qwen/Qwen-Image-2.1`, `-PE-T2I`, `-PE-I2I`: **Qwen RESEARCH LICENSE AGREEMENT** (release date
+2026-09-20). §1(i) *"Non-Commercial" shall mean for research or evaluation purposes only*; §2(a)
+grant is *FOR NON-COMMERCIAL PURPOSES ONLY*; §2(b) commercial use needs a separate licence
+(model-business@notice.qwencloud.com). Redistribution is permitted with notice/attribution (§3),
+"Built with Qwen" on derived models (§4b), Chinese law / Hangzhou courts (§8).
+
+Every previous Qwen-Image release (Qwen-Image, Edit, Edit-2509, Edit-2511, 2512, Layered) was
+Apache-2.0. This is a policy change by Qwen for the 2.x line.
+
+Fleet consequence (C7, `MLXServeCore` two-layer licence gate):
+- `weightLicense` must be declared as a package-local `SPDXLicense("LicenseRef-Qwen-Research")`,
+  **never added to `permissiveAllowlist`** (same call as AB-D-0055 for Audio8 — but stricter: this
+  one has no commercial tier at all).
+- Forge ships `MLXServeEngine(policy: .permissiveOnly, licenseEnforcement: .blocking)` → the
+  package is **refused** in shipping consumers by construction; advisory consumers surface it.
+- Position: same as klein-9B (`license:other`, CLAUDE.md watchlist): **a research/eval tier and a
+  recipe existence-proof, not a product asset** — unless a commercial licence is obtained. The
+  port is still worth having: it is the lightest Qwen image model by far (§7) and the
+  architecture (single-stream + prefix cache + RGBA VAE) is what the next open-licensed one
+  will look like.
+
+## 2. Reference implementation facts (all verified in the oracle, goldens on disk)
+
+### 2.1 Transformer (`QwenImage21Transformer2DModel`, 297 tensors, 14.23 GB bf16)
+- `img_in` 64→4096; `txt_in` = ZeroCenterRMSNorm(4096, eps 1e-6, scale = w+1, fp32) → Linear
+  4096→4096 → GELU(tanh) → Linear 4096→4096.
+- Timestep: cos-first sinusoid (256, freqs `exp(-ln 1e4 · i/128)`, ×1000) → Linear 256→4096 →
+  SiLU → Linear 4096→4096 (`time_text_embed.timestep_embedder`, no bias). The model casts the
+  timestep to the activation dtype BEFORE the sinusoid.
+- `modulation` = SiLU → Linear 4096→16384 (`modulation.1.weight`), chunks
+  `[mod1.scale, mod1.gate, mod2.scale, mod2.gate]`, shared by all 32 blocks. With
+  `causal_condition` the timestep gets an extra t=0 row: prefix tokens read row 1, target row 0.
+- Block: `h += tanh(g1)·Attn(LN(h)·(1+s1))`; `h += tanh(g2)·SwiGLU(LN(h)·(1+s2))`;
+  LN affine-less eps 1e-6; SwiGLU `out(silu(gate_layer(x))·proj(x))`.
+- Attention: q/k/v/out no bias; per-head RMSNorm(128, eps 1e-6) (standard diffusers RMSNorm);
+  complex RoPE (interleaved pairs), theta 10000, axes (16, 56, 56).
+- RoPE positions (`QwenImage21Rope.forward`): cursor walk — text tokens advance one shared
+  position on all 3 axes; an image block freezes frame = position, h ∈ [−⌈H/2⌉, ⌊H/2⌋),
+  w likewise, then position += max(H, W); trailing text continues.
+- `norm_out`: LN(affine-less) · (1 + Linear(silu(temb))) — **scale only**; `proj_out` 4096→64.
+- Prefill = exact multi-pass: per prefix segment attend to keys `[0, end)` (text segments with a
+  causal triangle), then target rows attend to everything. Decode (`kv_cache_mode="cached"`):
+  ONLY target rows run; per-layer K/V of the prefix (post-RoPE) were stored at step 0.
+- Joint sequence: each VL image slot → 4 latent tokens (`_IMG_TOKENS_PER_SLOT`); target slots
+  = `n_target / 4` appended `True`s to `img_mask`.
+
+### 2.2 Pipeline (`QwenImage21Pipeline.__call__`)
+- Templates are RAW strings (not apply_chat_template). System prompt
+  `Comprehend and analyze the provided prompt.` → **drop_idx = 14** (tokens
+  `[151644, 8948, 198, 1092, 30782, 408, 323, 23643, 279, 3897, 9934, 13, 151645, 198]`).
+  T2I: `<|im_start|>system\n{sys}<|im_end|>\n<|im_start|>user\n{prompt}<|im_end|>\n<|im_start|>assistant\n`.
+  Edit: user content prefixed `<image1><|vision_start|><|image_pad|><|vision_end|>`
+  (+ ` <image{i}>…` for more images, space-separated; `<imageN>` is plain BPE text).
+- Encoder output = `hidden_states[-1]` with the final RMSNorm **neutralised** (forward hook) —
+  the pre-norm last-layer output (|x| mean ≈ 9 vs ≈ 1.5 post-norm). transformers ≥5.0 would
+  otherwise return the normed tensor. Left padding; batch 1 → no mask.
+- Condition images: `img.convert("RGBA")`; ONE LANCZOS resize (`VaeImageProcessor.resize`, PIL
+  premultiplied RGBa round trip) to `calculate_dimensions(output_resolution², aspect)` (/32);
+  the VL copy is composited over white → RGB → `Qwen3VLProcessor` (smart_resize factor 32, bicubic,
+  min 256², max 4096², mean/std 0.5 → identity resize for our sizes); the VAE copy is the RGBA
+  in [−1, 1] (alpha included, `(1,4,1,H,W)`).
+- ⚠ Grid coupling: the DiT needs `4 × VL merged tokens == VAE latent tokens` per image. The
+  processor's `min_pixels` (65536) can inflate the VL grid for small `output_resolution` (a 3:4
+  image at 256² → 224×288 = 64512 px → VL 256×320 vs VAE 224×288 → the REFERENCE raises in
+  `build_token_metadata`). Irrelevant at the default 1024; our generator throws a clear error.
+- Latents `(B, 1, 64, H/16, W/16)` → pack = `view(B, 64, HW).transpose(1, 2)`; unpack reverse;
+  `height/width // 32 * 32`.
+- Schedule: `sigmas = linspace(1, 1/N, N)`; `mu = calculate_shift(n_target, 256, 8192, 0.5,
+  0.9)`; exponential shift `e^mu / (e^mu + 1/s − 1)`; `stretch_shift_to_terminal(0.02)`;
+  trailing 0; `t = sigma` (timestep/1000). Euler `x += (σ_{i+1} − σ_i)·v`.
+- Output: `vae.decode(z·std + mean)[:, :, 0]` → `postprocess` → **RGBA** PIL.
+
+### 2.3 VAE (`AutoencoderKLQwenImage21`, 238 tensors, 1.35 GB fp32)
+- `is_residual=True`, base 96 / decoder base 144, dim_mult [1,2,4,8,8], num_res_blocks 2,
+  temperal_downsample [F,T,T,T], z 64, in/out 4, patch_size None, 16× spatial.
+- `QwenImage21CausalConv3d` is a **Conv2d** (frame folded away; weights 4-D). Norm =
+  `F.normalize(dim=C)·√C·gamma` (eps 1e-12) = our `WanRMSNorm`.
+- Encoder stages (in→out, down, temporal): 96→96 (↓, F), 96→192 (↓, T), 192→384 (↓, T),
+  384→768 (↓, T), 768→768 (–). Each: 2 resnets → `downsampler` (ZeroPad2d(0,1,0,1) + stride-2
+  conv; 3d modes carry an unused-for-T=1 `time_conv`) then **+ AvgDown3D(x)**. AvgDown3D
+  front-zero-pads T to a multiple of factor_t — for T = 1 with factor_t 2 the even output
+  channels are the ZERO frame's mean (exactly what the reference computes).
+- Decoder stages: 1152→1152 (↑, T), 1152→1152 (↑, T), 1152→576 (↑, T), 576→288 (↑2d), 288→144
+  (–); 3 resnets each → `upsampler` (nearest 2× + conv dim→dim) then **+ DupUp3D(x,
+  first_chunk=True)** (drops the duplicated leading frame; a channel→space shuffle when
+  in ≠ out). Mid blocks: resnet → single-head attention over HW → resnet.
+- `quant_conv` 128→128, mode = first 64 channels; `post_quant_conv` 64→64; decode clamps [−1, 1].
+- latents_mean/std: 64 each (vae/config.json).
+
+### 2.4 Text encoder
+`text_encoder/` = 750 tensors, total 17,534,247,392 bytes, key set identical to
+`Qwen/Qwen3-VL-8B-Instruct`, sampled tensors byte-identical (all 750 checked per-tensor, first
+64 KB each: `qwen-image21-oracle/text_encoder_identity.json`). → **reuse the local
+`weights/Qwen3-VL-8B-Instruct` snapshot and `qwen3vl-mlx-swift`**; no download, no new port.
+The `processor/` tokenizer is the same vocab/merges re-serialised by transformers 5.
+
+## 3. Reuse map
+
+| Need | Source | Delta |
+|---|---|---|
+| Qwen3-VL-8B backbone (LM + ViT + deepstack + M-RoPE, parity-locked) | `mlxengine-think/PROD/qwen3vl-mlx-swift` | +`lastHiddenState(applyFinalNorm:)` (branch `pre-norm-hidden-state`, additive, default unchanged) |
+| Qwen3-VL image preprocessing (smart_resize, PIL bicubic, patchify) | `Qwen3VLImageProcessor` (same package) | none (defaults == 2.1 processor config) |
+| Wan-VAE blocks (RMS norm, resnet, attention, resample) | `qwen-image-edit-swift/QwenVAE.swift` | 2-D convs instead of causal 3-D |
+| Residual shortcuts AvgDown3D / DupUp3D / up-down stages | `wan-core-mlx-swift/WanVAE22.swift` | copied reshape order; explicit T axis for the T=1 semantics |
+| Timestep sinusoid, complex RoPE apply, strict loader, residency, CAN seams, NAX chunk | `qwen-image-edit-swift` | cos-first / no-bias variants; NAX window recomputed (§6) |
+| PIL LANCZOS | `qwen-image-edit-swift/PromptEncoder.swift` | 4-band + Pillow's RGBa premultiply/unpremultiply |
+
+## 4. Package layout (`WIP/qwen-image21-swift`)
+
+```
+Sources/QwenImage21/
+  QwenImage21Transformer.swift      model, blocks, attention (segment prefill + KV cache), RoPE, layout
+  AutoencoderKLQwenImage21.swift    RGBA residual VAE (channels-last 2-D)
+  QwenImage21PromptEncoder.swift    templates, drop_idx, pad expansion, pre-norm features
+  QwenImage21Pipeline.swift         scheduler, packing, calculate_dimensions, generator
+  QwenImage21Weights.swift          loaders (two-way strict) + key renames
+  QwenImage21ImageIO.swift          RGBA LANCZOS, white composite, PNG read/write
+Sources/QwenImage21Gate/main.swift  --sched --attn-probe --resize --vae --encoder --dit --generate
+Tests/QwenImage21Tests/             scheduler / dimension unit tests
+```
+Later: `Sources/MLXQwenImage21` — the MLXEngine `ModelPackage` wrapper (textToImage + imageEdit
+on one core, PackageID `qwen-image-2.1`, C7 `LicenseRef-Qwen-Research` package-local).
+
+## 5. Parity plan (fp32, CPU stream) — goldens in `qwen-image21-oracle/goldens/`
+
+| Gate | Golden | What it locks |
+|---|---|---|
+| `--sched` | `scheduler.json` (10 schedules) | mu, exponential shift, terminal stretch |
+| `--attn-probe` | self-contained | MLX SDPA `.causal` end-alignment for Lq < Lk (the segment prefill premise) |
+| `--resize` | `img_*.png` → `*_resized_rgba.png` | PIL LANCZOS RGBA premultiplied round trip |
+| `--vae` | `vae_img_a/b`, `vae_random_decode` | encode mode, normalisation, decode, PNG→VAE input |
+| `--encoder` | `encoder_{t2i_short,t2i_card,edit_1img,edit_2img}` | token ids, image_pad_mask, pixel_values, PRE-norm embeds |
+| `--dit` | `dit_{t2i_short,edit_1img,edit_2img}` | layout/segments, rotary, temb, modulation, blocks 0/1/7/15/31, prefill output, KV cache, cached step, uncached step |
+| e2e | `e2e_*.png` (bf16 MPS reference render) | decoded-output eyeball at 1024² |
+
+Layouts: T2I 16×16 target (256 tokens); edit 320² → 20×20 cond + 20×20 target; two images
+(320² + 288×384) → target 24×18 (follows the last image). Per-block goldens localise any break
+without a Python twin (mlx-porting: direct PyTorch → Swift with granular goldens).
+
+## 6. Known hazards carried in
+
+- **mlx#3797 NAX split-K GEMM** (mlx-swift ≤ 0.31.6; fix mlx#3810 merged 2026-07-07, no
+  mlx-swift release since): `img_mlp.out` is K = 12288, N = 4096 → the bad window is
+  **1024 ≤ rows ≤ 4096** at half precision — i.e. the CACHED-decode pass of every 512²…1024²
+  render (rows = target tokens exactly). Row-chunked at ≤896 rows (`QI21_NO_CHUNK=1` to
+  disable). Remove when the pin vendors ≥ a8c3e9c and the fleet NAX probe passes.
+- Long-graph fused-dispatch corruption family: `chainBlockGraphs` lever kept (off).
+- RNG: MLX normal ≠ torch randn; parity injects the torch noise.
+- bf16 vs fp32 timestep rounding: the reference rounds sigma to bf16 before the sinusoid.
+
+## 7. Cost / footprint (estimates — measure before declaring; AB-L-0063)
+
+Resident: DiT 14.2 GB bf16 + VAE 1.35 GB fp32 (0.68 bf16) ≈ **15.6 GB** — vs the 2511 core's
+41.4 GB floor. Encoder 17.5 GB bf16 per request (evicted before denoise, or resident on ≥64 GB).
+KV cache: prefix_len × 32 layers × 2 × 32×128 × 2 B = **0.5 MB per prefix token** (1024² cond
+image = 2.1 GB; 10 refs ≈ 21 GB). Attention at 2048² = 16384 target tokens: fused SDPA (no N²
+materialisation). This is the first Qwen image model that plausibly fits the 32 GB tier.
+
+## 8. Decisions log
+
+- 2026-09-20 New package, not a fourth wrapper in `qwen-image-edit-swift`: different core,
+  different encoder backbone, different licence posture (must not contaminate the Apache-2.0
+  package's story).
+- 2026-09-20 Text encoder: reuse `Qwen3-VL-8B-Instruct` weights (identity verified) rather than
+  downloading 17.5 GB of identical bytes; the pipeline's `text_encoder/` is only referenced.
+- 2026-09-20 `qwen3vl-mlx-swift` gets an additive `applyFinalNorm` flag instead of a fork; local
+  path dependency until the tag ships (fleet sweep flags path deps — temporary by design).
+- 2026-09-20 Oracle goldens at `output_resolution=320` (not 256) because of the min_pixels
+  grid-coupling edge (§2.2).

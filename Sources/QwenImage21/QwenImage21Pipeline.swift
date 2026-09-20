@@ -1,0 +1,229 @@
+// Qwen-Image-2.1 generation pipeline — Swift mirror of diffusers main `pipeline_qwenimage21.py`
+// (`QwenImage21Pipeline.__call__`): one path for text-to-image and image-conditioned editing.
+//
+//   1. condition images: one LANCZOS resize to calculate_dimensions(output_resolution², aspect)
+//      (/32) feeds BOTH the VL encoder (composited over white) and the VAE (RGBA, [-1, 1]);
+//      the output size defaults to the LAST image's aspect at output_resolution² area;
+//   2. encode_prompt -> pre-norm embeds + image_pad_mask (+ negative branch under true CFG);
+//   3. cond latents = VAE mode, normalised, packed (plain spatial flatten — patch_size 1),
+//      concatenated on the sequence axis BEFORE the target noise;
+//   4. FlowMatchEuler: sigmas linspace(1, 1/N, N) -> exponential dynamic shift with
+//      mu = calculate_shift(target tokens; 256/8192, 0.5/0.9) -> stretch to shift_terminal 0.02;
+//   5. denoise with the prefix KV cache (step 0 "extract", then "cached"); Euler update;
+//      guidance is OFF by default (true_cfg_scale 1.0 — 2.1 is meant to run without it);
+//   6. unpack -> de-normalise -> VAE decode -> RGBA8.
+
+import Foundation
+import MLX
+import MLXRandom
+
+public enum QwenImage21Scheduler {
+    public static let baseImageSeqLen = 256
+    public static let maxImageSeqLen = 8192
+    public static let baseShift: Float = 0.5
+    public static let maxShift: Float = 0.9
+    public static let shiftTerminal: Float = 0.02
+
+    /// diffusers `calculate_shift` with the 2.1 scheduler config.
+    public static func calculateShift(imageSeqLen: Int) -> Float {
+        let m = (maxShift - baseShift) / Float(maxImageSeqLen - baseImageSeqLen)
+        let b = baseShift - m * Float(baseImageSeqLen)
+        return Float(imageSeqLen) * m + b
+    }
+
+    /// `FlowMatchEulerDiscreteScheduler.set_timesteps(sigmas=linspace(1, 1/N, N), mu=mu)`:
+    /// exponential time shift, `stretch_shift_to_terminal`, trailing 0. Computed in Double and
+    /// rounded to Float like the reference's numpy(float64) -> torch.float32 path.
+    public static func sigmas(steps: Int, mu: Float) -> [Float] {
+        precondition(steps > 0)
+        let n = steps
+        var s: [Double] = (0..<n).map { i in
+            n == 1 ? 1.0 : 1.0 - Double(i) * (1.0 - 1.0 / Double(n)) / Double(n - 1)
+        }
+        let eMu = exp(Double(mu))
+        s = s.map { eMu / (eMu + (1.0 / $0 - 1.0)) }
+        // stretch_shift_to_terminal
+        let oneMinusLast = 1.0 - s[n - 1]
+        let scale = oneMinusLast / (1.0 - Double(shiftTerminal))
+        s = s.map { 1.0 - (1.0 - $0) / scale }
+        var out = s.map { Float($0) }
+        out.append(0)
+        return out
+    }
+}
+
+public enum QwenImage21Latents {
+    /// (B, 64, 1, h, w) -> (B, h·w, 64) — 2.1 consumes latents unpatched.
+    public static func pack(_ x5: MLXArray) -> MLXArray {
+        let x = x5.squeezed(axis: 2)
+        let (b, c, h, w) = (x.dim(0), x.dim(1), x.dim(2), x.dim(3))
+        return x.reshaped(b, c, h * w).transposed(0, 2, 1)
+    }
+
+    /// (B, h·w, 64) -> (B, 64, 1, h, w) with h = pixelHeight / 16.
+    public static func unpack(_ x: MLXArray, pixelHeight: Int, pixelWidth: Int) -> MLXArray {
+        let b = x.dim(0)
+        let h = 2 * (pixelHeight / 32)
+        let w = 2 * (pixelWidth / 32)
+        return x.transposed(0, 2, 1).reshaped(b, x.dim(2), 1, h, w)
+    }
+
+    /// diffusers `calculate_dimensions`: sqrt-area, ratio preserved, /32 with Python round().
+    public static func calculateDimensions(targetArea: Int, ratio: Double) -> (width: Int, height: Int) {
+        let width = (Double(targetArea) * ratio).squareRoot()
+        let height = width / ratio
+        return (Int((width / 32).rounded(.toNearestOrEven)) * 32, Int((height / 32).rounded(.toNearestOrEven)) * 32)
+    }
+}
+
+/// End-to-end generator (batch 1). Holds the DiT + VAE; the ~17 GB Qwen3-VL encoder is loaded
+/// per request through `encoderProvider` and dropped before the denoise peak unless
+/// `keepEncoderResident` (the qwen-image-edit-swift residency contract).
+public final class QwenImage21Generator {
+    public let encoderProvider: () async throws -> QwenImage21PromptEncoder
+    public let transformer: QwenImage21Transformer2DModel
+    public let vae: AutoencoderKLQwenImage21
+    public let keepEncoderResident: Bool
+    private var residentEncoder: QwenImage21PromptEncoder?
+
+    public init(encoderProvider: @escaping () async throws -> QwenImage21PromptEncoder,
+                transformer: QwenImage21Transformer2DModel, vae: AutoencoderKLQwenImage21,
+                keepEncoderResident: Bool = false) {
+        self.encoderProvider = encoderProvider
+        self.transformer = transformer
+        self.vae = vae
+        self.keepEncoderResident = keepEncoderResident
+    }
+
+    private func loadEncoder(isolation: isolated (any Actor)? = #isolation) async throws -> QwenImage21PromptEncoder {
+        if keepEncoderResident, let residentEncoder { return residentEncoder }
+        let e = try await encoderProvider()
+        if keepEncoderResident { residentEncoder = e }
+        return e
+    }
+
+    private func evictEncoder(_ e: inout QwenImage21PromptEncoder?) {
+        guard !keepEncoderResident else { return }
+        e = nil
+        Memory.clearCache()
+    }
+
+    public struct Result {
+        public let image: QwenImage21RGBAImage
+        public let latentsPacked: MLXArray
+        public let sigmas: [Float]
+    }
+
+    /// - images: condition images (any size); resized here like the reference.
+    /// - width/height: explicit output size (rounded down to /32); nil -> derived.
+    /// - latents: injected packed noise [1, h·w, 64] for parity gates (torch RNG ≠ MLX RNG).
+    public func generate(
+        prompt: String, images: [QwenImage21RGBAImage] = [], negativePrompt: String? = nil,
+        trueCFGScale: Float = 1.0, width: Int? = nil, height: Int? = nil, outputResolution: Int = 1024,
+        steps: Int = 40, seed: UInt64 = 0, useKVCache: Bool = true, latents injected: MLXArray? = nil,
+        progress: ((Int, Int) -> Void)? = nil, isolation: isolated (any Actor)? = #isolation
+    ) async throws -> Result {
+        guard steps > 0 else { throw QwenImage21Error.invalidInput("steps must be > 0") }
+        let area = outputResolution * outputResolution
+
+        // 1. Condition images: one resize for both consumers; output size from the last image.
+        var resized: [QwenImage21RGBAImage] = []
+        for img in images {
+            let (iw, ih) = QwenImage21Latents.calculateDimensions(targetArea: area, ratio: Double(img.width) / Double(img.height))
+            resized.append(QwenImage21PILResize.resizeRGBA(img, outWidth: iw, outHeight: ih))
+        }
+        var w = width ?? outputResolution
+        var h = height ?? outputResolution
+        if let last = images.last, width == nil || height == nil {
+            let (cw, ch) = QwenImage21Latents.calculateDimensions(targetArea: area, ratio: Double(last.width) / Double(last.height))
+            w = width ?? cw
+            h = height ?? ch
+        }
+        w = w / 32 * 32
+        h = h / 32 * 32
+        guard w >= 32, h >= 32 else { throw QwenImage21Error.invalidInput("output size below 32x32") }
+
+        // 2. Prompt encoding (encoder evicted before the DiT peak).
+        let doCFG = trueCFGScale > 1 && negativePrompt != nil
+        var encoderRef: QwenImage21PromptEncoder? = try await loadEncoder()
+        let pos = try encoderRef!.encode(prompt: prompt, images: resized)
+        let neg = doCFG ? try encoderRef!.encode(prompt: negativePrompt!, images: resized) : nil
+        if let neg { eval(pos.embeds, neg.embeds) } else { eval(pos.embeds) }
+        evictEncoder(&encoderRef)
+        let dtype = pos.embeds.dtype
+        try Task.checkCancellation()
+
+        // 3. Condition latents (VAE mode, normalised, packed) + shapes; grid consistency check.
+        var condParts: [MLXArray] = []
+        var imgShapes: [(Int, Int, Int)] = []
+        for (i, img) in resized.enumerated() {
+            let pixels = MLXArray(img.vaePixelsCHW(), [1, 4, 1, img.height, img.width]).asType(dtype)
+            let lat = vae.encode(pixels)  // (1, 64, 1, h, w)
+            let (lh, lw) = (lat.dim(3), lat.dim(4))
+            let g = pos.mergedGrids[i]
+            guard g.0 * g.1 * g.2 * 4 == lh * lw else {
+                throw QwenImage21Error.invalidInput(
+                    "image \(i + 1): VL grid \(g.1)x\(g.2) (x4 = \(g.0 * g.1 * g.2 * 4) tokens) does not match the VAE latent grid \(lh)x\(lw); the processor's min/max_pixels re-sized it — raise output_resolution")
+            }
+            condParts.append(QwenImage21Latents.pack(lat).asType(dtype))
+            imgShapes.append((1, lh, lw))
+        }
+        let condLatents: MLXArray? = condParts.isEmpty ? nil : (condParts.count == 1 ? condParts[0] : concatenated(condParts, axis: 1))
+
+        // 4. Target noise (torch-compatible only via injection).
+        let (lh, lw) = (h / 16, w / 16)
+        var latents: MLXArray
+        if let injected {
+            latents = injected.asType(dtype)
+        } else {
+            let key = MLXRandom.key(seed)
+            latents = QwenImage21Latents.pack(MLXRandom.normal([1, 64, 1, lh, lw], key: key)).asType(dtype)
+        }
+        let nTarget = lh * lw
+        imgShapes.append((1, lh, lw))
+
+        // 5. Layout + schedule.
+        let slots = pos.imagePadMask + Array(repeating: true, count: nTarget / 4)
+        let layout = try transformer.buildLayout(imgMask: slots, imgShapes: imgShapes)
+        let negLayout = try neg.map { try transformer.buildLayout(imgMask: $0.imagePadMask + Array(repeating: true, count: nTarget / 4), imgShapes: imgShapes) }
+        let mu = QwenImage21Scheduler.calculateShift(imageSeqLen: nTarget)
+        let sigmas = QwenImage21Scheduler.sigmas(steps: steps, mu: mu)
+        let cacheOn = useKVCache && transformer.causalCondition
+        let posCache = cacheOn ? QwenImage21KVCache(numLayers: transformer.numLayers) : nil
+        let negCache = cacheOn && doCFG ? QwenImage21KVCache(numLayers: transformer.numLayers) : nil
+
+        // 6. Denoise.
+        for i in 0..<steps {
+            try Task.checkCancellation()
+            let mode: QwenImage21KVCacheMode = cacheOn ? (i == 0 ? .extract : .cached) : .none
+            let t = MLXArray([sigmas[i]])
+            let hidden = condLatents.map { concatenated([$0, latents], axis: 1) } ?? latents
+            var v = transformer(hiddenStates: hidden, encoderHiddenStates: pos.embeds, timestep: t, layout: layout,
+                                kvCache: posCache, mode: mode)
+            v = v[0..., (v.dim(1) - nTarget)...]
+            if let neg, let negLayout {
+                var nv = transformer(hiddenStates: hidden, encoderHiddenStates: neg.embeds, timestep: t, layout: negLayout,
+                                     kvCache: negCache, mode: mode)
+                nv = nv[0..., (nv.dim(1) - nTarget)...]
+                v = nv + trueCFGScale * (v - nv)
+            }
+            latents = latents + (sigmas[i + 1] - sigmas[i]) * v
+            eval(latents)
+            if mode == .extract {
+                // materialise the prefix K/V slices so the full prefill graph can be released
+                eval((posCache?.arrays ?? []) + (negCache?.arrays ?? []))
+            }
+            progress?(i + 1, steps)
+        }
+        try Task.checkCancellation()
+
+        // 7. Decode -> RGBA8.
+        let unpacked = QwenImage21Latents.unpack(latents, pixelHeight: h, pixelWidth: w)
+        let decoded = vae.decode(AutoencoderKLQwenImage21.deNormalize(unpacked.asType(vae.weightDtype)))  // (1,4,1,H,W)
+        let img8 = clip((decoded.squeezed(axis: 2) + 1) * 127.5, min: 0, max: 255).round().asType(.uint8)
+        let hwc = img8[0].transposed(1, 2, 0)
+        eval(hwc)
+        let image = QwenImage21RGBAImage(rgba: hwc.asArray(UInt8.self), width: w, height: h)
+        return Result(image: image, latentsPacked: latents, sigmas: sigmas)
+    }
+}
