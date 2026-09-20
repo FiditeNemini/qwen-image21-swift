@@ -262,3 +262,9 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   wall, sustained **3.0–3.5 s/step**, peak 31.2 GB (torch MPS bf16: 80 s / ~2 s/step on the same
   box → ~1.5× headroom: fp32 RoPE cast path, modulation slice/concat, 5-way NAX chunk at 4096
   rows are the suspects). Edit 1024²: prefill 11.5 s (8.2k tokens), cached steps ~3.6 s.
+- 2026-09-20 Release timing, native 2048² T2I (20 steps): sustained **19.3 s/step** (16,384
+  tokens; attention-bound: 6.2× the 1024² step for 4× tokens), denoise peak 31.2 GB, but the
+  **fp32 VAE decode at 2048² spikes the process peak to 62.4 GB** — AB-T-0021 (tiled VAE decode
+  becomes a prerequisite the day an output cap rises) applies to this package on day one; a bf16
+  decoder or the reference's `enable_tiling` (256-px tiles, 192 stride, blend) is the fix. Render
+  coherent (`outputs/rel_t2i_2048.png`). Edit 1024² Release: 164.1 s wall / 40 steps.
