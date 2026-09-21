@@ -322,3 +322,15 @@ draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.
   reference pipeline's math is the model's published recipe and the model degrades in that regime; the
   wrapper's 768² edit default can move to **960²** after an in-app eyeball; 1024² stays capped until the
   authors answer diffusers#14824 (follow-up comment drafted, not posted).
+- 2026-09-21 Upstream #14824 activity: **@peterc independently confirmed on CUDA** (RTX 3090 Ti,
+  diffusers @80c7ed26, torch 2.14+cu130, transformers 5.17, bf16, no ComfyUI) — same class of
+  failure with a harsher symptom (the subject is replaced, e.g. the dog becomes a cat, rather
+  than preserved-and-haloed), seed-independent, and his boundary is LOWER: 896² broken / 864²
+  fine (56 vs 54 latents per side) against our 960² clean / 1024² broken (60 vs 64). So the
+  threshold is fixture- and platform-dependent, not a hard cutoff — which argues against moving
+  the wrapper's edit default to 960² on our fixture alone; **768² stays the default**.
+  @sayakpaul (maintainer) asked whether other platforms are affected and whether prompts/CFG
+  help, and is routing to the Qwen team (@naykun). Follow-up comment revised
+  (`qwen-image21-oracle/UPSTREAM-COMMENT-14824-draft.md`), awaiting the operator's go.
+- 2026-09-21 Package **published: https://github.com/xocialize/qwen-image21-swift** (public,
+  17 tracked files, no weights/goldens/outputs; qwen3vl-mlx-swift pinned by tag).
