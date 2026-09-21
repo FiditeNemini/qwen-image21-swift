@@ -291,3 +291,19 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   scaling with max(h, w); `calculate_shift` fed target-only tokens; target/condition resolution
   coupling). Upstream report drafted: `qwen-image21-oracle/UPSTREAM-REPORT-1024-edit.md`.
   fp32 DiT cost for the record: 18–23 s/step at 1024², peak 53.6 GB.
+- 2026-09-20 fp32 discriminator, both sides, CLOSED: torch fp32 (MPS, 1,079 s / 40 steps) is the
+  same haloed near-copy; torch fp32 vs torch bf16 43.4 dB (cos 0.99979); **Swift fp32 vs torch
+  fp32 53.6 dB (cos 0.99999)** at the 8.2k-token production layout — the tightest end-to-end
+  agreement so far, and final proof that the 1024²-edit behaviour is the reference pipeline's,
+  not the port's (upstream draft: qwen-image21-oracle/UPSTREAM-REPORT-1024-edit.md).
+
+## 10. Status summary (2026-09-20 EOD)
+
+Done: oracle + goldens (incl. 8.2k-token layout); Swift core (DiT, RGBA VAE, Qwen3-VL prompt
+encoder, pipeline, image I/O); every parity gate green (CPU-stream 1e-6 at 320², production
+scale fp32 median row cos 0.9999964); e2e == torch at 36 dB (bf16) / 53.6 dB (fp32); engine
+wrapper with manifest/MAT/CAN tests 9/9; registry row; Release timing; licence decision filed.
+Open (AB-T-0154): footprint split measured (QI21_MEMBENCH + in-app phys); tiled/bf16 VAE decode
+for 2048² (62 GB peak, AB-T-0021); qwen3vl-mlx-swift v0.3.0 tag + path-dep flip (AB-A-0081);
+in-app validation through a consumer; the reference's 1024²-edit degradation (upstream report
+draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.5× vs torch MPS).
