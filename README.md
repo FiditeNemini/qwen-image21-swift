@@ -12,6 +12,10 @@ Reference: diffusers main `QwenImage21Pipeline` (PR #14804). Spec, architecture 
 2511 port, reuse map and parity plan: `PORTING-SPEC.md`. Goldens + oracle:
 `../qwen-image21-oracle`.
 
+> Known reference-side issue: the reference pipeline's image editing degrades at its default
+> `output_resolution=1024` (512/768 are correct) — the port reproduces it faithfully, so the engine
+> wrapper defaults edits to 768². Tracked upstream: https://github.com/huggingface/diffusers/issues/14824.
+
 ```
 swift build
 .build/debug/QwenImage21Gate --sched  ../qwen-image21-oracle/goldens

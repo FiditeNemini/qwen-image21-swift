@@ -289,7 +289,7 @@ materialisation). This is the first Qwen image model that plausibly fits the 32 
   probed, the 1024²-edit degradation is a property of the reference pipeline's math/config for
   that size (candidates for upstream: RoPE frame-axis offset between condition and target blocks
   scaling with max(h, w); `calculate_shift` fed target-only tokens; target/condition resolution
-  coupling). Upstream report drafted: `qwen-image21-oracle/UPSTREAM-REPORT-1024-edit.md`.
+  coupling). Upstream report drafted (`qwen-image21-oracle/UPSTREAM-REPORT-1024-edit.md`) and later filed as huggingface/diffusers#14824.
   fp32 DiT cost for the record: 18–23 s/step at 1024², peak 53.6 GB.
 - 2026-09-20 fp32 discriminator, both sides, CLOSED: torch fp32 (MPS, 1,079 s / 40 steps) is the
   same haloed near-copy; torch fp32 vs torch bf16 43.4 dB (cos 0.99979); **Swift fp32 vs torch
@@ -307,3 +307,7 @@ Open (AB-T-0154): footprint split measured (QI21_MEMBENCH + in-app phys); tiled/
 for 2048² (62 GB peak, AB-T-0021); qwen3vl-mlx-swift v0.3.0 tag + path-dep flip (AB-A-0081);
 in-app validation through a consumer; the reference's 1024²-edit degradation (upstream report
 draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.5× vs torch MPS).
+- 2026-09-20 (operator go) qwen3vl-mlx-swift **v0.3.0 tagged and pushed** (main fast-forwarded to
+  5cbd4f1); this package now pins `from: "0.3.0"` (no local path dependency). Upstream report
+  **filed: https://github.com/huggingface/diffusers/issues/14824** (QwenImage21Pipeline editing
+  degrades at output_resolution=1024; 512/768 correct; cache/CFG/version/precision excluded).
