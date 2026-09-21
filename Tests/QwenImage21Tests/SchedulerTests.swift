@@ -14,6 +14,21 @@ final class SchedulerTests: XCTestCase {
         XCTAssertTrue(zip(s, s.dropFirst()).allSatisfy { $0 > $1 })
     }
 
+    /// Noise replay (diffusers#14824): an edit must never draw the text-to-image noise for the
+    /// same seed, or it re-runs the generation instead of editing.
+    func testEditNoiseIsDomainSeparatedFromTextToImage() {
+        for seed: UInt64 in [0, 1, 42, 4242, UInt64.max] {
+            XCTAssertEqual(QwenImage21Latents.noiseSeed(seed, isEdit: false), seed)
+            XCTAssertNotEqual(QwenImage21Latents.noiseSeed(seed, isEdit: true), seed)
+            // deterministic: same inputs, same draw
+            XCTAssertEqual(QwenImage21Latents.noiseSeed(seed, isEdit: true),
+                           QwenImage21Latents.noiseSeed(seed, isEdit: true))
+        }
+        // and no edit seed collides with the T2I seed of another ordinary seed nearby
+        let edits = Set((0..<64).map { QwenImage21Latents.noiseSeed(UInt64($0), isEdit: true) })
+        XCTAssertTrue(edits.isDisjoint(with: Set((0..<64).map { UInt64($0) })))
+    }
+
     func testCalculateDimensions() {
         let (w, h) = QwenImage21Latents.calculateDimensions(targetArea: 1024 * 1024, ratio: 1)
         XCTAssertEqual(w, 1024); XCTAssertEqual(h, 1024)

@@ -33,7 +33,7 @@ final class QwenImage21PackageTests: XCTestCase {
         XCTAssertEqual(back.defaultSteps, 20)
         XCTAssertEqual(back.defaultTrueCFGScale, 1.0)
         XCTAssertEqual(back.defaultOutputResolution, 1024)
-        XCTAssertEqual(back.defaultEditOutputResolution, 768)  // reference degrades at 1024² edits (AB-R-0261)
+        XCTAssertEqual(back.defaultEditOutputResolution, 1024)  // 768 cap lifted once noise replay was the cause
         XCTAssertTrue(back.useKVCache)
         XCTAssertEqual(QwenImage21Configuration().quant, .bf16)
     }

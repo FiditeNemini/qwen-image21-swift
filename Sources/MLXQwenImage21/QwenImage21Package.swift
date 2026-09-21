@@ -38,10 +38,10 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
     /// until tiled decode lands, AB-T-0021).
     public var defaultOutputResolution: Int
     /// `output_resolution` for EDITS (the area condition images are resized to and the output
-    /// follows). 768, NOT the reference's 1024: with diffusers main @80c7ed26 the reference itself
-    /// returns a haloed near-copy with the instruction ignored at 1024² (cache on or off) while
-    /// 512/768 edit cleanly (AB-R-0261); the port reproduces the reference, so it inherits this.
-    /// Revisit when the 1024² behaviour is understood (fp32 probes pending).
+    /// follows). Back to the reference's 1024 as of 2026-09-21: the 768 cap was a defensive
+    /// response to what turned out to be NOISE REPLAY, not a resolution limit — see
+    /// `QwenImage21Latents.noiseSeed`, which removes the cause. 1024² edits are correct once the
+    /// edit noise cannot collide with the generation noise.
     public var defaultEditOutputResolution: Int
     /// Keep the ~17 GB Qwen3-VL encoder resident between requests (big-RAM tiers).
     public var keepEncoderResident: Bool
@@ -64,7 +64,7 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
         defaultSteps: Int = 40,
         defaultTrueCFGScale: Float = 1.0,
         defaultOutputResolution: Int = 1024,
-        defaultEditOutputResolution: Int = 768,
+        defaultEditOutputResolution: Int = 1024,
         keepEncoderResident: Bool = false,
         useKVCache: Bool = true,
         modelsRootDirectory: URL? = nil
@@ -194,8 +194,9 @@ public final class QwenImage21Package: ModelPackage {
                     summary: "Qwen-Image-2.1 instruction editing with up to 10 reference images "
                         + "(<image1>…<imageN> in the prompt), identity-preserving edits, transparent-layer "
                         + "editing and subject extraction; output follows the LAST image's aspect at "
-                        + "output_resolution² (default 768² — the reference degrades at 1024², AB-R-0261). "
-                        + "RESEARCH LICENCE — non-commercial only.",
+                        + "output_resolution² (default 1024²). Edit noise is domain-separated from the "
+                        + "text-to-image draw, so a generate-then-edit flow at the same seed cannot replay "
+                        + "the generation. RESEARCH LICENCE — non-commercial only.",
                     modes: []
                 ),
             ]

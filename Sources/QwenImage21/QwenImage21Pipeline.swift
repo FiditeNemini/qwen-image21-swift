@@ -68,6 +68,26 @@ public enum QwenImage21Latents {
         return x.transposed(0, 2, 1).reshaped(b, x.dim(2), 1, h, w)
     }
 
+    /// Seed actually handed to the RNG, domain-separated by path.
+    ///
+    /// **Noise replay (diffusers#14824, confirmed with the Qwen team 2026-09-21).** An edit whose
+    /// initial noise happens to be the draw that GENERATED the reference image re-runs that
+    /// generation instead of following the instruction: the result is a sharpened, saturated
+    /// near-copy with the instruction ignored (gradient energy ~2.9x the input, PSNR ~13 dB vs
+    /// ~21 dB for a real edit). It is not resolution-dependent and not RNG-dependent — it needs
+    /// only the same noise, which a generate-then-edit flow produces whenever both steps share a
+    /// seed and a shape. Measured in this package: T2I 1024²/seed 42 then editing that output at
+    /// 1024²/seed 42 replays (13.73 dB, 2.97x); the same edit at seed 4242 is correct (21.09 dB,
+    /// 1.05x).
+    ///
+    /// So the edit path offsets the seed by a fixed constant. Deterministic — a given
+    /// (seed, size, images) still reproduces exactly — but it can no longer collide with the
+    /// text-to-image draw at the same seed and size. Injected `latents` bypass this entirely, so
+    /// parity fixtures and a deliberate replay repro are unaffected.
+    public static func noiseSeed(_ seed: UInt64, isEdit: Bool) -> UInt64 {
+        isEdit ? seed &+ 0x9E37_79B9_7F4A_7C15 : seed
+    }
+
     /// diffusers `calculate_dimensions`: sqrt-area, ratio preserved, /32 with Python round().
     public static func calculateDimensions(targetArea: Int, ratio: Double) -> (width: Int, height: Int) {
         let width = (Double(targetArea) * ratio).squareRoot()
@@ -198,7 +218,7 @@ public final class QwenImage21Generator {
         if let injected {
             latents = injected.asType(dtype)
         } else {
-            let key = MLXRandom.key(seed)
+            let key = MLXRandom.key(QwenImage21Latents.noiseSeed(seed, isEdit: !images.isEmpty))
             latents = QwenImage21Latents.pack(MLXRandom.normal([1, 64, 1, lh, lw], key: key)).asType(dtype)
         }
         let nTarget = lh * lw

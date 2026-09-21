@@ -366,3 +366,39 @@ Next tasks, in order: (1) `QI21_MEMBENCH`-style measured footprint split + in-ap
 (2) tiled or bf16 VAE decode for 2048² (62.4 GB decode peak, AB-T-0021); (3) in-app validation
 through a consumer; (4) step-time headroom (~1.5× vs torch MPS). The 768² edit cap stays until
 the Qwen team answers #14824.
+
+## 12. Noise replay — the real cause of the "1024² edit" failure (2026-09-21, CLOSED)
+
+The Qwen team (@naykun) called it on #14824 and it is confirmed. The fixture photo was generated
+T2I at 1024²/seed 42; every failing edit then ran at 1024²/seed 42, so **the edit's initial noise
+was the draw that generated the image**, and the trajectory re-ran the generation instead of
+following the instruction. There is no size threshold and no diffusers bug.
+
+| run (same photo + prompt, 1024², 40 steps) | PSNR vs input | grad-energy ratio | result |
+|---|---:|---:|---|
+| torch, seed 42 (= the T2I seed) | 13.00 | 2.88 | replay: no scarf, haloed |
+| torch, seed 12345 | 22.22 | 1.02 | correct |
+| torch, seed 777 | 21.28 | 0.97 | correct |
+| Swift, MLX-native noise (different RNG) | 20.86 | 0.94 | correct |
+| Swift, injected torch seed-42 noise | 13.05 | 2.88 | replay (matches torch exactly) |
+| **Swift, our own T2I → edit, same size + seed** | **13.73** | **2.97** | **replay — the user-facing trap** |
+| Swift, same but seed 4242 | 21.09 | 1.05 | correct |
+| **Swift, same seed 42, AFTER the fix below** | **17.27** | **1.07** | **correct** |
+
+**Mechanism is RNG-independent**: it needs only that the two draws coincide (same stream, seed and
+shape). Reproduced with torch's RNG and with MLX's.
+
+**Fix (`QwenImage21Latents.noiseSeed`)**: the edit path offsets the seed by a fixed constant, so an
+edit can never draw the text-to-image noise for the same seed and size. Deterministic; injected
+`latents` bypass it, so parity fixtures and a deliberate replay repro still work. Unit-tested.
+**The 768² edit cap is lifted — `defaultEditOutputResolution` is back to 1024.**
+
+**Corrections to earlier entries in this file.** The §9/§10 "reference degrades at 1024² edits"
+framing was wrong, and so were the discriminator conclusions built on it: 512/768/896/960 worked
+because a different target shape draws different noise, not because of a size threshold; the
+"768² reference + 1024² target still degrades" probe had a 1024² target, so it was replay too;
+the ComfyUI cross-check was NOT noise-independent (`prepare_noise` uses `torch.manual_seed` +
+CPU `torch.randn`, the same stream `randn_tensor` uses — measured cos 0.999999 vs the diffusers
+draw, max diff 0.015 = bf16 rounding), so it rules out a diffusers coding bug but says nothing
+about noise. The clean 1024² edit of a synthetic (never-generated) image in §9 was the control
+that should have been run first.
