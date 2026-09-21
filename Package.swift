@@ -22,10 +22,9 @@ let package = Package(
         .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.4"),
         .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3"),
-        // Qwen3-VL conditioner backbone. LOCAL PATH while the `pre-norm-hidden-state` branch
-        // (lastHiddenState(applyFinalNorm:)) is unreleased; flip to the tagged URL
-        // (xocialize/qwen3vl-mlx-swift ≥ 0.3.0) once it ships — the fleet sweep flags path deps.
-        .package(path: "../../../mlxengine-think/PROD/qwen3vl-mlx-swift"),
+        // Qwen3-VL conditioner backbone (≥ 0.3.0 for lastHiddenState(applyFinalNorm:), the
+        // pre-final-norm feature Qwen-Image-2.1 conditions on). Tagged 2026-09-20.
+        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.3.0"),
         // MLXEngine contract (MLXToolKit) + the executable MAT/CAN gates, for the wrapper only.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.56.0"),
     ],

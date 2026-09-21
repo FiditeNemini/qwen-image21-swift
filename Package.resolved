@@ -1,5 +1,5 @@
 {
-  "originHash" : "adb3f699ff21781b2a59ee48cdf8527db87e0fdf5bca8c3261ec06a67a402f97",
+  "originHash" : "e187c7176b1474705dda77df1ecf0132be4b455b7027b9f2abfb47cae608f003",
   "pins" : [
     {
       "identity" : "designscaffold",
@@ -44,6 +44,15 @@
       "state" : {
         "revision" : "bd4b7434e6bdb588c7ef55706ff8904cb7fd4c57",
         "version" : "3.31.4"
+      }
+    },
+    {
+      "identity" : "qwen3vl-mlx-swift",
+      "kind" : "remoteSourceControl",
+      "location" : "https://github.com/xocialize/qwen3vl-mlx-swift",
+      "state" : {
+        "revision" : "5cbd4f185ab683fe742f54272b46ec1b75953506",
+        "version" : "0.3.0"
       }
     },
     {
