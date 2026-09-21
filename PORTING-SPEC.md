@@ -334,3 +334,8 @@ draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.
   (`qwen-image21-oracle/UPSTREAM-COMMENT-14824-draft.md`), awaiting the operator's go.
 - 2026-09-21 Package **published: https://github.com/xocialize/qwen-image21-swift** (public,
   17 tracked files, no weights/goldens/outputs; qwen3vl-mlx-swift pinned by tag).
+- 2026-09-21 Follow-up POSTED to #14824
+  (https://github.com/huggingface/diffusers/issues/14824#issuecomment-5762252236): ComfyUI
+  cross-check, noise-independence, prompt/CFG results, the two boundaries side by side, and the
+  mismatched-grid probe. Ball is with the Qwen team; watch for their answer before revisiting
+  the 768² edit cap.
