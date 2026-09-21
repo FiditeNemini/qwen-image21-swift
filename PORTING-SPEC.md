@@ -311,3 +311,14 @@ draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.
   5cbd4f1); this package now pins `from: "0.3.0"` (no local path dependency). Upstream report
   **filed: https://github.com/huggingface/diffusers/issues/14824** (QwenImage21Pipeline editing
   degrades at output_resolution=1024; 512/768 correct; cache/CFG/version/precision excluded).
+- 2026-09-20 **Independent-implementation oracle (AB-T-0155, ComfyUI native @ c194dd00, MPS, no diffusers
+  code; note: `qwen-image21-oracle/COMFY-ORACLE-1024-edit.md`, outputs `goldens/comfy/`).** The 1024² scarf
+  and beach edits collapse identically in ComfyUI — **40.1 / 39.7 dB PSNR to the diffusers outputs with
+  ComfyUI's own noise and schedule**, 40.8 dB with the diffusers noise + exact sigmas injected, and **49.1 dB
+  between two ComfyUI noise draws** (noise-independent, reference-dominated). 768² agrees with diffusers at
+  33.2 dB and is correct on both. New boundary probes: **896² and 960² edits are clean and correct**; a
+  **768² reference paired with a 1024² target still degrades** (HF ratio 2.33, no scarf) → the trigger is
+  the *target* grid at 64 latents per side, not the joint token count and not the reference. Verdict: the
+  reference pipeline's math is the model's published recipe and the model degrades in that regime; the
+  wrapper's 768² edit default can move to **960²** after an in-app eyeball; 1024² stays capped until the
+  authors answer diffusers#14824 (follow-up comment drafted, not posted).
