@@ -339,3 +339,30 @@ draft; wrapper defaults edits to 768² meanwhile); Swift step-time headroom (~1.
   cross-check, noise-independence, prompt/CFG results, the two boundaries side by side, and the
   mismatched-grid probe. Ball is with the Qwen team; watch for their answer before revisiting
   the 768² edit cap.
+
+## 11. State at the 2026-09-21 reboot (resume from here)
+
+**Pushed to GitHub (survives anything on this box):**
+- `xocialize/qwen-image21-swift` @ main — this package (17 files, no weights/goldens/outputs).
+- `xocialize/qwen3vl-mlx-swift` @ **v0.3.0** — the conditioner backbone this package pins by tag.
+- `xocialize/mlx-engine-swift` @ main — the registry row for this package.
+- `xocialize/AgentBridge-Store` @ main — AB-T-0154/0155, AB-D-0085, AB-L-0133, AB-R-0253…0264, AB-A-0081.
+- Upstream: https://github.com/huggingface/diffusers/issues/14824 (+ our follow-up comment).
+
+**On the volume only (no git remote; regenerable, but single-copy):**
+- `WIP/qwen-image21-oracle` (3.9 GB): `make_goldens.py` (every golden phase incl. `dit_large`),
+  `check_text_encoder_identity.py`, the probe scripts, the two upstream docs, `goldens/` (1.9 GB),
+  `.venv` (transformers 5.14.1) and `.venv517` (5.17.0).
+- `WIP/comfyui-oracle` (32 GB): the ComfyUI clone + venv + merged single-file weights, `submit.py`,
+  `poll.py`, `compare.py`, `merge_shards.py`. **Server is stopped**; restart per COMFY-ORACLE-1024-edit.md.
+- `weights/Qwen-Image-2.1` (15 GB) and `weights/Qwen3-VL-8B-Instruct` (16 GB).
+
+**Nothing was left in `/private/tmp`** (AB-L-0086): no harness, no goldens, no fixtures — only
+disposable build logs and re-downloadable upstream reference copies.
+
+**Cold resume:** `swift build` (resolves the qwen3vl tag from the network), then
+`.build/debug/QwenImage21Gate --sched ../qwen-image21-oracle/goldens` as the 2-second smoke test.
+Next tasks, in order: (1) `QI21_MEMBENCH`-style measured footprint split + in-app phys re-baseline;
+(2) tiled or bf16 VAE decode for 2048² (62.4 GB decode peak, AB-T-0021); (3) in-app validation
+through a consumer; (4) step-time headroom (~1.5× vs torch MPS). The 768² edit cap stays until
+the Qwen team answers #14824.
