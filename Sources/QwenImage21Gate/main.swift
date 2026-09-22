@@ -287,6 +287,55 @@ func gateDiTLarge(root: URL, goldens: URL, dtype: DType) throws {
     }
 }
 
+/// Measured split footprint for the manifest (efficiency contract 1.14): resident floor = the
+/// weights after load with the cache cleared; peak = the worst MLX active+cache during a request at
+/// the input envelope; activation = peak − floor, declared at +20%.
+///
+/// Steps are deliberately low (memory is driven by the per-step graph shape and the one decode, not
+/// by how many steps run). The per-request Qwen3-VL load is a TRANSIENT inside `generate`, so it
+/// lands in the activation term — matching the 2511 package's convention.
+/// ⚠ These are MLX-pool numbers, not in-app `phys_footprint` (the BiRefNet ~2.7× lesson).
+func memBench(root: URL, qwenDir: URL) async throws {
+    let steps = Int(arg("--steps") ?? "2")!
+    let t0 = Date()
+    let tr = try QwenImage21Weights.loadTransformer(directory: root.appendingPathComponent("transformer"), dtype: .bfloat16)
+    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: has("--bf16-vae") ? .bfloat16 : .float32)
+    eval(tr, vae)
+    Memory.clearCache()
+    let floor = Memory.activeMemory
+    print(String(format: "resident floor (DiT bf16 + VAE %@, post-load, cache cleared): %.2f GB   [load %.1fs]",
+                 has("--bf16-vae") ? "bf16" : "fp32", Double(floor) / 1e9, Date().timeIntervalSince(t0)))
+    let gen = QwenImage21Generator(
+        encoderProvider: { try await QwenImage21PromptEncoder.load(qwenDir: qwenDir, dtype: .bfloat16) },
+        transformer: tr, vae: vae, keepEncoderResident: false)
+    let photo = arg("--image").map { URL(fileURLWithPath: $0) }
+    let ref = try photo.map { try QwenImage21PNG.read(url: $0) }
+    var envelopes: [(String, [QwenImage21RGBAImage], Int)] = [("T2I 1024²", [], 1024), ("T2I 2048²", [], 2048)]
+    if let ref {
+        envelopes.append(("edit 1024², 1 ref", [ref], 1024))
+        envelopes.append(("edit 1024², 4 refs", [ref, ref, ref, ref], 1024))
+    }
+    // NB: never pass a Swift String to a C `%s` — it segfaults (exit 139). Pad in Swift, format with %@.
+    func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
+    print(pad("envelope", 22) + "   floor GB    peak GB     act GB   declare GB")
+    for (name, images, res) in envelopes {
+        Memory.clearCache()
+        Memory.peakMemory = 0
+        let t = Date()
+        _ = try await gen.generate(
+            prompt: "a red fox in fresh snow", images: images,
+            width: images.isEmpty ? res : nil, height: images.isEmpty ? res : nil,
+            outputResolution: res, steps: steps, seed: 1)
+        let peak = Memory.peakMemory
+        let act = max(peak - floor, 0)
+        print(pad(name, 22) + String(format: " %10.2f %10.2f %10.2f %12.2f   [%.0fs]",
+                     Double(floor) / 1e9, Double(peak) / 1e9, Double(act) / 1e9,
+                     Double(act) * 1.2 / 1e9, Date().timeIntervalSince(t)))
+        Memory.clearCache()
+    }
+    print(String(format: "\nDeclare: QuantFootprint(.bf16, resident %.0f, peakActivation <worst act above> * 1.2)", Double(floor)))
+}
+
 func generate(root: URL, qwenDir: URL) async throws {
     let prompt = arg("--prompt") ?? "A neon shop sign that reads \"QWEN IMAGE 2.1\", rainy night, reflections on wet pavement"
     let steps = Int(arg("--steps") ?? "40")!
@@ -373,6 +422,10 @@ do {
         } else {
             try gateDiTLarge(root: root, goldens: goldens, dtype: dtype)
         }
+    } else if has("--membench") {
+        let root = URL(fileURLWithPath: arg("--membench")!)
+        let q = URL(fileURLWithPath: cli[cli.firstIndex(of: "--membench")! + 2])
+        try await memBench(root: root, qwenDir: q)
     } else if has("--generate") {
         let root = URL(fileURLWithPath: arg("--generate")!)
         let q = URL(fileURLWithPath: cli[cli.firstIndex(of: "--generate")! + 2])
