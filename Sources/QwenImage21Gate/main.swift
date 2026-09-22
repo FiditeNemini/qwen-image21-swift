@@ -287,6 +287,33 @@ func gateDiTLarge(root: URL, goldens: URL, dtype: DType) throws {
     }
 }
 
+/// bf16-vs-fp32 VAE decode on the same final latents (GPU): is a bf16 decoder visually lossless?
+func vaeDTypeCheck(root: URL, latentsFiles: [String]) throws {
+    let v32 = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: .float32)
+    let v16 = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: .bfloat16)
+    for f in latentsFiles {
+        var l = try MLX.loadArrays(url: URL(fileURLWithPath: f))["latents_packed"]!
+        if l.ndim == 2 { l = l[.newAxis] }
+        let side = Int(Double(l.dim(1)).squareRoot()) * 16
+        let z = AutoencoderKLQwenImage21.deNormalize(QwenImage21Latents.unpack(l.asType(.float32), pixelHeight: side, pixelWidth: side))
+        let a = v32.decode(z)
+        let b = v16.decode(z.asType(.bfloat16)).asType(.float32)
+        eval(a, b)
+        // PSNR on the 8-bit RGB the user actually gets
+        let a8 = clip((a + 1) * 127.5, min: 0, max: 255).round()
+        let b8 = clip((b + 1) * 127.5, min: 0, max: 255).round()
+        let mse = mean((a8[0..., ..<3] - b8[0..., ..<3]).square()).item(Float.self)
+        let psnr = 10 * log10(255 * 255 / max(mse, 1e-9))
+        let d = abs(a8 - b8)
+        let maxDiff = d.max().item(Float.self)
+        let over4 = mean((d .> 4).asType(.float32)).item(Float.self) * 100
+        let over8 = mean((d .> 8).asType(.float32)).item(Float.self) * 100
+        let over16 = mean((d .> 16).asType(.float32)).item(Float.self) * 100
+        print(String(format: "  %@  PSNR %.2f dB  max|Δ| %.0f  |Δ|>4: %.3f%%  >8: %.4f%%  >16: %.5f%%",
+                     (f as NSString).lastPathComponent, psnr, maxDiff, over4, over8, over16))
+    }
+}
+
 /// Measured split footprint for the manifest (efficiency contract 1.14): resident floor = the
 /// weights after load with the cache cleared; peak = the worst MLX active+cache during a request at
 /// the input envelope; activation = peak − floor, declared at +20%.
@@ -314,6 +341,10 @@ func memBench(root: URL, qwenDir: URL) async throws {
     if let ref {
         envelopes.append(("edit 1024², 1 ref", [ref], 1024))
         envelopes.append(("edit 1024², 4 refs", [ref, ref, ref, ref], 1024))
+    }
+    // `--only-refs N`: measure just one N-reference edit envelope (e.g. the model's max of 10).
+    if let n = arg("--only-refs").flatMap(Int.init), let ref {
+        envelopes = [("edit 1024², \(n) refs", Array(repeating: ref, count: n), 1024)]
     }
     // NB: never pass a Swift String to a C `%s` — it segfaults (exit 139). Pad in Swift, format with %@.
     func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
@@ -422,6 +453,9 @@ do {
         } else {
             try gateDiTLarge(root: root, goldens: goldens, dtype: dtype)
         }
+    } else if has("--vae-dtype") {
+        let root = URL(fileURLWithPath: arg("--vae-dtype")!)
+        try vaeDTypeCheck(root: root, latentsFiles: args("--latents"))
     } else if has("--membench") {
         let root = URL(fileURLWithPath: arg("--membench")!)
         let q = URL(fileURLWithPath: cli[cli.firstIndex(of: "--membench")! + 2])

@@ -407,3 +407,29 @@ that should have been run first.
   noise-replay diagnosis with the seed table, retracts the "noise-independent" claim with the
   measurement, reports the RNG-independence + our generate-then-edit repro and the seed
   domain-separation fix, and flags that @peterc's case is probably NOT covered by ours.
+
+## 13. Measured footprint + enforced envelope (2026-09-22, AB-R-0290)
+
+`QwenImage21Gate --membench` (Release, GPU idle): floor = active memory after load with the cache
+cleared; per envelope, cache cleared and peak reset, one full request (the per-request Qwen3-VL
+load lands in the activation term).
+
+| envelope (fp32 VAE) | peak GB | activation GB |
+|---|---:|---:|
+| T2I 1024² | 32.87 | 17.29 |
+| edit 1024², 1 ref | 35.03 | 19.45 |
+| edit 1024², 4 refs | 41.52 | 25.94 |
+| edit 1024², 10 refs (model max) | 51.57 | 35.98 |
+| T2I 2048² | 72.91 | 57.33 |
+
+Floor 15.58 GB. **Declared: resident 15.6 GB + activation 43.2 GB (10-ref × 1.2) = 58.8 GB**,
+replacing the 15.6 + 19 GB estimate, and below the 2511 package's 63 GB. **Enforced** in `run()`
+by `QwenImage21Envelope`: output area ≤ 1024², ≤ 10 references, edit output_resolution ≤ 1024 —
+outside requests are refused with a clear error (not clamped), so the declaration is an upper
+bound. The target-size rule now lives in one place (`QwenImage21Latents.targetSize`) shared by the
+generator and the guard.
+
+bf16 VAE, measured and NOT adopted: floor 14.91 GB, 4-ref edit 35.44 GB (−6 GB), but 2048² still
+63.59 GB (−13%), so it does not fix the native size; decode quality 42.8–44.9 dB PSNR vs fp32 with
+0.15–0.35% of 8-bit values off by > 8 levels and outliers to 75. **2048² needs tiled decode
+(AB-T-0021) — that is the next task**, and it lifts the area cap.

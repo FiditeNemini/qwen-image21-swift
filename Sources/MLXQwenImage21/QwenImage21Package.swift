@@ -143,13 +143,47 @@ public enum QwenImage21PackageError: Error, LocalizedError {
     case unreadableSnapshot(String)
     case imageDecode
     case pngEncode
+    /// The request would run outside the input envelope the declared footprint was MEASURED at,
+    /// so the memory governor's reservation would under-state it. Refused rather than clamped:
+    /// silently shrinking a requested size changes the output.
+    case outsideMeasuredEnvelope(String)
 
     public var errorDescription: String? {
         switch self {
         case .unreadableSnapshot(let p): return "Qwen-Image-2.1 snapshot not readable at \(p)."
         case .imageDecode: return "Could not decode an input image."
         case .pngEncode: return "PNG encoding failed."
+        case .outsideMeasuredEnvelope(let why): return why
         }
+    }
+}
+
+/// The input envelope the manifest's footprint was measured at (`QwenImage21Gate --membench`,
+/// M5 Max, fp32 VAE; AB-R-0290). `run()` refuses anything outside it so the declaration stays an
+/// upper bound.
+public enum QwenImage21Envelope {
+    /// Output area. 2048² (the model's native size) peaks at 72.9 GB, dominated by the VAE decode;
+    /// a bf16 decoder only brings that to 63.6 GB, so it needs tiled decode (AB-T-0021) to fit.
+    public static let maxTargetPixels = 1024 * 1024
+    /// Reference images: the model's documented maximum, measured at 1024² each (peak 51.6 GB).
+    public static let maxReferenceImages = 10
+
+    /// nil when the request is inside the envelope, else a user-facing reason.
+    public static func violation(targetWidth: Int, targetHeight: Int, referenceCount: Int,
+                                 outputResolution: Int) -> String? {
+        if targetWidth * targetHeight > maxTargetPixels {
+            return "Qwen-Image-2.1: \(targetWidth)×\(targetHeight) exceeds the measured envelope "
+                + "(output area ≤ 1024²). Larger outputs peak above 70 GB in the VAE decode and need tiled "
+                + "decode, which is not implemented yet."
+        }
+        if referenceCount > maxReferenceImages {
+            return "Qwen-Image-2.1 accepts at most \(maxReferenceImages) reference images; got \(referenceCount)."
+        }
+        if referenceCount > 0, outputResolution * outputResolution > maxTargetPixels {
+            return "Qwen-Image-2.1: edit output_resolution \(outputResolution) exceeds the measured envelope "
+                + "(≤ 1024). Each reference image is resized to that area, so larger values exceed the declared footprint."
+        }
+        return nil
     }
 }
 
@@ -165,13 +199,19 @@ public final class QwenImage21Package: ModelPackage {
             license: LicenseDeclaration(weightLicense: .qwenResearch, portCodeLicense: .mit),
             provenance: Provenance(sourceRepo: "Qwen/Qwen-Image-2.1", revision: "main", tier: 3),
             requirements: RequirementsManifest(
-                // ESTIMATE, not yet a measured split (AB-T-0154 acceptance #3 owes the QI21_MEMBENCH
-                // numbers): resident = DiT bf16 14.23 GB + VAE fp32 1.35 GB = 15.6 GB; the Qwen3-VL
-                // encoder (~17.5 GB bf16) is a per-request TRANSIENT evicted before the denoise peak,
-                // so it lands in the activation term. First bf16 1024²/40-step render: MLX peak
-                // 31.2 GB → activation ≈ 15.6 GB → 19 GB at +20%. Smoke MLX-peak, not in-app phys.
+                // MEASURED split (QwenImage21Gate --membench, M5 Max, AB-R-0290). Resident floor =
+                // DiT bf16 + VAE fp32 after load, cache cleared: 15.58 GB. The Qwen3-VL-8B encoder
+                // (~17.5 GB) is a per-request TRANSIENT evicted before the denoise peak, so it lands
+                // in the activation term. Peak / activation per envelope:
+                //   T2I 1024²            32.87 / 17.29 GB
+                //   edit 1024², 1 ref    35.03 / 19.45
+                //   edit 1024², 4 refs   41.52 / 25.94
+                //   edit 1024², 10 refs  51.57 / 35.98   ← worst inside the envelope → ×1.2 = 43.2 GB
+                //   T2I 2048²            72.91 / 57.33   ← OUTSIDE the envelope; refused by run()
+                // The envelope (QwenImage21Envelope) is enforced in run() so this stays an upper bound.
+                // MLX-pool numbers, not in-app phys_footprint — in-app re-baseline still owed.
                 footprints: [
-                    QuantFootprint(quant: .bf16, residentBytes: 15_600_000_000, peakActivationBytes: 19_000_000_000)
+                    QuantFootprint(quant: .bf16, residentBytes: 15_600_000_000, peakActivationBytes: 43_200_000_000)
                 ],
                 requiredBackends: [.metalGPU],
                 os: OSRequirement(minMacOS: SemanticVersion(major: 26, minor: 0, patch: 0)),
@@ -279,10 +319,20 @@ public final class QwenImage21Package: ModelPackage {
         }
         try Task.checkCancellation()
 
+        let outputResolution = images.isEmpty
+            ? configuration.defaultOutputResolution : configuration.defaultEditOutputResolution
+        let (tw, th) = QwenImage21Latents.targetSize(
+            imageSizes: images.map { ($0.width, $0.height) }, width: width, height: height,
+            outputResolution: outputResolution)
+        if let why = QwenImage21Envelope.violation(
+            targetWidth: tw, targetHeight: th, referenceCount: images.count, outputResolution: outputResolution)
+        {
+            throw QwenImage21PackageError.outsideMeasuredEnvelope(why)
+        }
+
         let result = try await generator.generate(
             prompt: prompt, images: images, negativePrompt: negative, trueCFGScale: cfg,
-            width: width, height: height,
-            outputResolution: images.isEmpty ? configuration.defaultOutputResolution : configuration.defaultEditOutputResolution,
+            width: width, height: height, outputResolution: outputResolution,
             steps: steps, seed: seed, useKVCache: configuration.useKVCache,
             progress: { step, total in RunProgress.report(.denoise, step: step, totalSteps: total) })
 

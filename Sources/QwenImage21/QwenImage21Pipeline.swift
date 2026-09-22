@@ -88,6 +88,23 @@ public enum QwenImage21Latents {
         isEdit ? seed &+ 0x9E37_79B9_7F4A_7C15 : seed
     }
 
+    /// The output size the pipeline will produce — the reference `__call__`'s rule, in one place so
+    /// the generator and any caller-side envelope guard cannot drift: explicit width/height win;
+    /// otherwise the LAST condition image's aspect at `outputResolution²` area; otherwise
+    /// `outputResolution` square; then floor to a multiple of 32.
+    public static func targetSize(imageSizes: [(width: Int, height: Int)], width: Int?, height: Int?,
+                                  outputResolution: Int) -> (width: Int, height: Int) {
+        var w = width ?? outputResolution
+        var h = height ?? outputResolution
+        if let last = imageSizes.last, width == nil || height == nil {
+            let (cw, ch) = calculateDimensions(
+                targetArea: outputResolution * outputResolution, ratio: Double(last.width) / Double(last.height))
+            w = width ?? cw
+            h = height ?? ch
+        }
+        return (w / 32 * 32, h / 32 * 32)
+    }
+
     /// diffusers `calculate_dimensions`: sqrt-area, ratio preserved, /32 with Python round().
     public static func calculateDimensions(targetArea: Int, ratio: Double) -> (width: Int, height: Int) {
         let width = (Double(targetArea) * ratio).squareRoot()
@@ -170,15 +187,9 @@ public final class QwenImage21Generator {
             let (iw, ih) = QwenImage21Latents.calculateDimensions(targetArea: area, ratio: Double(img.width) / Double(img.height))
             resized.append(QwenImage21PILResize.resizeRGBA(img, outWidth: iw, outHeight: ih))
         }
-        var w = width ?? outputResolution
-        var h = height ?? outputResolution
-        if let last = images.last, width == nil || height == nil {
-            let (cw, ch) = QwenImage21Latents.calculateDimensions(targetArea: area, ratio: Double(last.width) / Double(last.height))
-            w = width ?? cw
-            h = height ?? ch
-        }
-        w = w / 32 * 32
-        h = h / 32 * 32
+        let (w, h) = QwenImage21Latents.targetSize(
+            imageSizes: images.map { ($0.width, $0.height) }, width: width, height: height,
+            outputResolution: outputResolution)
         guard w >= 32, h >= 32 else { throw QwenImage21Error.invalidInput("output size below 32x32") }
 
         // 2. Prompt encoding (encoder evicted before the DiT peak).

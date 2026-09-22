@@ -29,6 +29,18 @@ final class SchedulerTests: XCTestCase {
         XCTAssertTrue(edits.isDisjoint(with: Set((0..<64).map { UInt64($0) })))
     }
 
+    /// The single target-size rule shared by the generator and the package's envelope guard.
+    func testTargetSizeRule() {
+        // T2I: explicit size wins, floored to /32
+        XCTAssertTrue(QwenImage21Latents.targetSize(imageSizes: [], width: 1000, height: 1030, outputResolution: 1024) == (992, 1024))
+        // T2I: no size → output_resolution square
+        XCTAssertTrue(QwenImage21Latents.targetSize(imageSizes: [], width: nil, height: nil, outputResolution: 1024) == (1024, 1024))
+        // edit: follows the LAST image's aspect at output_resolution² area (3:4 → 896×1184 at 1024²)
+        let t = QwenImage21Latents.targetSize(imageSizes: [(1000, 1000), (300, 400)], width: nil, height: nil, outputResolution: 1024)
+        XCTAssertEqual(t.width * 4, t.height * 3, accuracy: 256)
+        XCTAssertLessThanOrEqual(abs(t.width * t.height - 1024 * 1024), 1024 * 64)
+    }
+
     func testCalculateDimensions() {
         let (w, h) = QwenImage21Latents.calculateDimensions(targetArea: 1024 * 1024, ratio: 1)
         XCTAssertEqual(w, 1024); XCTAssertEqual(h, 1024)
