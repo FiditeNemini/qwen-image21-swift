@@ -402,3 +402,8 @@ CPU `torch.randn`, the same stream `randn_tensor` uses — measured cos 0.999999
 draw, max diff 0.015 = bf16 rounding), so it rules out a diffusers coding bug but says nothing
 about noise. The clean 1024² edit of a synthetic (never-generated) image in §9 was the control
 that should have been run first.
+- 2026-09-21 Correction POSTED to #14824
+  (https://github.com/huggingface/diffusers/issues/14824#issuecomment-5770745487): confirms the
+  noise-replay diagnosis with the seed table, retracts the "noise-independent" claim with the
+  measurement, reports the RNG-independence + our generate-then-edit repro and the seed
+  domain-separation fix, and flags that @peterc's case is probably NOT covered by ours.
