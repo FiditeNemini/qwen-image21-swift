@@ -367,6 +367,34 @@ public final class QwenImage21Decoder3d: Module {
     }
 }
 
+// MARK: - Prefix / suffix split for exact halo-tiled decode
+
+extension QwenImage21Decoder3d {
+    /// The spatially GLOBAL part: conv_in, the mid block (single-head attention over every latent
+    /// position), and `up_blocks[..<split]`. Must run on the whole latent grid — tiling across the
+    /// attention would change the result.
+    func prefix(_ x: MLXArray, split: Int) -> MLXArray {
+        var x = convIn(x)
+        x = midBlock(x)
+        for b in upBlocks[..<split] { x = b(x) }
+        return x
+    }
+
+    /// The spatially LOCAL tail: `up_blocks[split...]`, norm_out, conv_out. Only 3×3 / 1×1 convs,
+    /// per-pixel norms, nearest-2× upsampling and the DupUp3D pixel shuffle — so an output pixel
+    /// depends on a bounded input neighbourhood and a halo-padded tile reproduces it exactly.
+    func suffix(_ x: MLXArray, split: Int) -> MLXArray {
+        var x = x
+        for b in upBlocks[split...] { x = b(x) }
+        return convOut(silu(normOut(x)))
+    }
+
+    /// Output pixels per suffix-input pixel (×2 for every up block in the suffix that upsamples).
+    func suffixScale(split: Int) -> Int {
+        upBlocks[split...].reduce(1) { $0 * ($1.upsampler == nil ? 1 : 2) }
+    }
+}
+
 // MARK: - Top level
 
 public final class AutoencoderKLQwenImage21: Module {
@@ -435,6 +463,59 @@ public final class AutoencoderKLQwenImage21: Module {
         x = decoder(x)
         x = clip(x, min: -1, max: 1)
         return x.transposed(0, 3, 1, 2).expandedDimensions(axis: 2)
+    }
+
+    /// Halo-tiled decode — bit-identical to `decode` when `halo` covers the suffix's receptive
+    /// field, with the high-resolution working set bounded by one tile.
+    ///
+    /// Why it is exact (the vae22 recipe from wan-core `WanVAE22Streaming`): the only non-local
+    /// layer is the mid-block attention, and it runs in `prefix` on the whole latent grid, where it
+    /// is cheap. Everything after `split` is local, so each tile is decoded from its region plus a
+    /// `halo` of REAL neighbour pixels and then CROPPED back to its region — no blending. Interior
+    /// pixels never see the artificial zero-padding at a tile edge, so they equal the untiled
+    /// result. Receptive field of the default suffix (`split` 2 = up_blocks 2…4 + conv_out),
+    /// measured in suffix-input pixels: 6.5 + 3.25 + 1.5 + 0.25 ≈ 11.5 → default halo 12.
+    ///
+    /// Why it matters: the untiled 2048² decode peaks at 72.9 GB (57 GB of activation), almost all
+    /// of it in up_blocks 2…4 at 1024–2048 px with 288–576 channels in fp32 (AB-R-0290).
+    public func decodeTiled(_ latents: MLXArray, tilesH: Int, tilesW: Int, halo: Int = 12,
+                            split: Int = 2) -> MLXArray {
+        precondition(latents.ndim == 5 && latents.dim(2) == 1)
+        precondition(tilesH >= 1 && tilesW >= 1 && halo >= 0)
+        var x = latents.asType(weightDtype).squeezed(axis: 2).transposed(0, 2, 3, 1)
+        x = postQuantConv(x)
+        let g = decoder.prefix(x, split: split)
+        eval(g)
+        let (gh, gw) = (g.dim(1), g.dim(2))
+        let s = decoder.suffixScale(split: split)
+        func spans(_ n: Int, _ k: Int) -> [(Int, Int)] { (0..<k).map { ($0 * n / k, ($0 + 1) * n / k) } }
+        var rows: [MLXArray] = []
+        for (r0, r1) in spans(gh, min(tilesH, gh)) {
+            var cols: [MLXArray] = []
+            for (c0, c1) in spans(gw, min(tilesW, gw)) {
+                let (hr0, hr1) = (max(r0 - halo, 0), min(r1 + halo, gh))
+                let (hc0, hc1) = (max(c0 - halo, 0), min(c1 + halo, gw))
+                let tile = decoder.suffix(g[0..., hr0..<hr1, hc0..<hc1, 0...], split: split)
+                // crop the halo: this tile's input began at hr0/hc0, so its output began at s·hr0/s·hc0
+                let kept = tile[0..., ((r0 - hr0) * s)..<((r1 - hr0) * s), ((c0 - hc0) * s)..<((c1 - hc0) * s), 0...]
+                let out = clip(kept, min: -1, max: 1)
+                eval(out)  // realise now so this tile's high-res intermediates free before the next
+                cols.append(out)
+            }
+            rows.append(cols.count == 1 ? cols[0] : concatenated(cols, axis: 2))
+        }
+        let full = rows.count == 1 ? rows[0] : concatenated(rows, axis: 1)
+        return full.transposed(0, 3, 1, 2).expandedDimensions(axis: 2)
+    }
+
+    /// Output area up to which the pipeline decodes UNTILED — the parity-locked path. Above it the
+    /// pipeline switches to `decodeTiled`, exact on the CPU stream (max|Δ| 0.0 at halo 12) and
+    /// 64–65 dB vs untiled on the GPU for real latents (AB-R-0310).
+    public static let untiledDecodeMaxPixels = 1024 * 1024
+
+    /// Tiles for `decodeTiled`: roughly `tileSide`-pixel output tiles (1 = untiled on that axis).
+    public static func suggestedTiles(outputHeight: Int, outputWidth: Int, tileSide: Int = 1024) -> (Int, Int) {
+        (max(1, (outputHeight + tileSide - 1) / tileSide), max(1, (outputWidth + tileSide - 1) / tileSide))
     }
 
     public static func normalize(_ raw: MLXArray) -> MLXArray {

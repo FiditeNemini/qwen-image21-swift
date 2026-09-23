@@ -272,7 +272,16 @@ public final class QwenImage21Generator {
 
         // 7. Decode -> RGBA8.
         let unpacked = QwenImage21Latents.unpack(latents, pixelHeight: h, pixelWidth: w)
-        let decoded = vae.decode(AutoencoderKLQwenImage21.deNormalize(unpacked.asType(vae.weightDtype)))  // (1,4,1,H,W)
+        let z = AutoencoderKLQwenImage21.deNormalize(unpacked.asType(vae.weightDtype))
+        // Above 1024² the untiled decode dominates memory (72.9 GB peak at 2048², AB-R-0290), so
+        // decode in halo-exact tiles; at or below it, keep the parity-locked untiled path.
+        let decoded: MLXArray  // (1,4,1,H,W)
+        if w * h > AutoencoderKLQwenImage21.untiledDecodeMaxPixels {
+            let (tilesH, tilesW) = AutoencoderKLQwenImage21.suggestedTiles(outputHeight: h, outputWidth: w)
+            decoded = vae.decodeTiled(z, tilesH: tilesH, tilesW: tilesW)
+        } else {
+            decoded = vae.decode(z)
+        }
         let img8 = clip((decoded.squeezed(axis: 2) + 1) * 127.5, min: 0, max: 255).round().asType(.uint8)
         let hwc = img8[0].transposed(1, 2, 0)
         eval(hwc)

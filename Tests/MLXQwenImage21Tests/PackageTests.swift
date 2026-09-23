@@ -35,13 +35,18 @@ final class QwenImage21PackageTests: XCTestCase {
     /// run() must refuse anything the footprint was not measured at, or the declaration lies.
     func testEnvelopeGuard() {
         typealias E = QwenImage21Envelope
-        // inside: 1024² T2I, non-square with the same area, 10 references at 1024
+        // T2I inside: 1024² and EVERY size on the model card (the cap is their max area, 2400×1792)
+        XCTAssertEqual(E.maxTextToImagePixels, 2400 * 1792)
         XCTAssertNil(E.violation(targetWidth: 1024, targetHeight: 1024, referenceCount: 0, outputResolution: 1024))
-        XCTAssertNil(E.violation(targetWidth: 2048, targetHeight: 512, referenceCount: 0, outputResolution: 1024))
+        for (w, h) in E.documentedTextToImageSizes {
+            XCTAssertNil(E.violation(targetWidth: w, targetHeight: h, referenceCount: 0, outputResolution: 1024), "\(w)x\(h)")
+        }
+        // edits inside: 1024² with up to 10 references
         XCTAssertNil(E.violation(targetWidth: 1024, targetHeight: 1024, referenceCount: 10, outputResolution: 1024))
-        // outside: native 2048² (needs tiled decode), >10 refs, edit output_resolution above 1024
-        XCTAssertNotNil(E.violation(targetWidth: 2048, targetHeight: 2048, referenceCount: 0, outputResolution: 2048))
-        XCTAssertNotNil(E.violation(targetWidth: 1056, targetHeight: 1024, referenceCount: 0, outputResolution: 1024))
+        // outside: T2I beyond the largest documented size; edits above 1024²; >10 refs; edit resolution > 1024
+        XCTAssertNotNil(E.violation(targetWidth: 2432, targetHeight: 1792, referenceCount: 0, outputResolution: 1024))
+        XCTAssertNotNil(E.violation(targetWidth: 4096, targetHeight: 4096, referenceCount: 0, outputResolution: 1024))
+        XCTAssertNotNil(E.violation(targetWidth: 2048, targetHeight: 2048, referenceCount: 1, outputResolution: 1024))
         XCTAssertNotNil(E.violation(targetWidth: 1024, targetHeight: 1024, referenceCount: 11, outputResolution: 1024))
         XCTAssertNotNil(E.violation(targetWidth: 768, targetHeight: 768, referenceCount: 1, outputResolution: 1536))
     }

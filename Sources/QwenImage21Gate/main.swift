@@ -12,6 +12,7 @@
 
 import Foundation
 import MLX
+import MLXRandom
 import QwenImage21
 
 setbuf(stdout, nil)  // line-by-line logs when redirected to a file
@@ -287,6 +288,54 @@ func gateDiTLarge(root: URL, goldens: URL, dtype: DType) throws {
     }
 }
 
+/// Exactness + memory gate for `decodeTiled`: untiled vs tiled over a halo sweep, on one latent.
+/// `--random N` uses a seeded N×N normalized latent (no DiT needed); `--latents f` a saved one.
+func vaeTileCheck(root: URL) throws {
+    let vae = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: .float32)
+    var z: MLXArray
+    if let f = arg("--latents") {
+        var l = try MLX.loadArrays(url: URL(fileURLWithPath: f))["latents_packed"]!
+        if l.ndim == 2 { l = l[.newAxis] }
+        let side = Int(Double(l.dim(1)).squareRoot()) * 16
+        z = QwenImage21Latents.unpack(l.asType(.float32), pixelHeight: side, pixelWidth: side)
+    } else {
+        let n = Int(arg("--random") ?? "48")!
+        z = MLXRandom.normal([1, 64, 1, n, n], key: MLXRandom.key(7))
+    }
+    z = AutoencoderKLQwenImage21.deNormalize(z)
+    let tiles = Int(arg("--tiles") ?? "2")!
+    let halos = (arg("--halos") ?? "0,4,8,10,11,12,16").split(separator: ",").compactMap { Int($0) }
+    print("latent \(z.shape)  output \(z.dim(3) * 16)²  tiles \(tiles)×\(tiles)  device \(Device.defaultDevice())")
+    Memory.clearCache(); Memory.peakMemory = 0
+    let base0 = Memory.activeMemory
+    var t = Date()
+    let ref = vae.decode(z); eval(ref)
+    let refPeak = Memory.peakMemory - base0
+    print(String(format: "  untiled                peak +%.2f GB  %.1fs", Double(refPeak) / 1e9, Date().timeIntervalSince(t)))
+    let r8 = clip((ref + 1) * 127.5, min: 0, max: 255).round()
+    var dump: [String: MLXArray] = ["latents_denorm": z, "untiled": ref]
+    for h in halos {
+        Memory.clearCache(); Memory.peakMemory = 0
+        let b0 = Memory.activeMemory
+        t = Date()
+        let out = vae.decodeTiled(z, tilesH: tiles, tilesW: tiles, halo: h); eval(out)
+        let peak = Memory.peakMemory - b0
+        let maxAbs = abs(out - ref).max().item(Float.self)
+        let o8 = clip((out + 1) * 127.5, min: 0, max: 255).round()
+        let mse = mean((o8 - r8).square()).item(Float.self)
+        let psnr = mse == 0 ? Float.infinity : 10 * log10(255 * 255 / mse)
+        let exact = maxAbs == 0
+        print(String(format: "  tiled halo %2d          peak +%.2f GB  %.1fs  max|Δ| %.3e  PSNR(8-bit) %@%@", h,
+                     Double(peak) / 1e9, Date().timeIntervalSince(t), maxAbs,
+                     psnr.isInfinite ? "∞" : String(format: "%.2f dB", psnr), exact ? "  EXACT" : ""))
+        dump["tiled_h\(h)_t\(tiles)"] = out
+    }
+    if let path = arg("--dump") {
+        try MLX.save(arrays: dump, url: URL(fileURLWithPath: path))
+        print("dumped \(dump.keys.sorted()) to \(path)")
+    }
+}
+
 /// bf16-vs-fp32 VAE decode on the same final latents (GPU): is a bf16 decoder visually lossless?
 func vaeDTypeCheck(root: URL, latentsFiles: [String]) throws {
     let v32 = try QwenImage21Weights.loadVAE(directory: root.appendingPathComponent("vae"), dtype: .float32)
@@ -337,25 +386,31 @@ func memBench(root: URL, qwenDir: URL) async throws {
         transformer: tr, vae: vae, keepEncoderResident: false)
     let photo = arg("--image").map { URL(fileURLWithPath: $0) }
     let ref = try photo.map { try QwenImage21PNG.read(url: $0) }
-    var envelopes: [(String, [QwenImage21RGBAImage], Int)] = [("T2I 1024²", [], 1024), ("T2I 2048²", [], 2048)]
+    // (name, references, width, height, output_resolution)
+    var envelopes: [(String, [QwenImage21RGBAImage], Int?, Int?, Int)] = [
+        ("T2I 1024²", [], 1024, 1024, 1024), ("T2I 2048²", [], 2048, 2048, 2048)]
     if let ref {
-        envelopes.append(("edit 1024², 1 ref", [ref], 1024))
-        envelopes.append(("edit 1024², 4 refs", [ref, ref, ref, ref], 1024))
+        envelopes.append(("edit 1024², 1 ref", [ref], nil, nil, 1024))
+        envelopes.append(("edit 1024², 4 refs", [ref, ref, ref, ref], nil, nil, 1024))
     }
     // `--only-refs N`: measure just one N-reference edit envelope (e.g. the model's max of 10).
     if let n = arg("--only-refs").flatMap(Int.init), let ref {
-        envelopes = [("edit 1024², \(n) refs", Array(repeating: ref, count: n), 1024)]
+        envelopes = [("edit 1024², \(n) refs", Array(repeating: ref, count: n), nil, nil, 1024)]
+    }
+    // `--t2i-only`: the text-to-image sizes the tiled decode opens up.
+    if has("--t2i-only") {
+        envelopes = [("T2I 1024²", [], 1024, 1024, 1024), ("T2I 2048²", [], 2048, 2048, 2048),
+                     ("T2I 2400×1792 (max)", [], 2400, 1792, 2048), ("T2I 2752×1536", [], 2752, 1536, 2048)]
     }
     // NB: never pass a Swift String to a C `%s` — it segfaults (exit 139). Pad in Swift, format with %@.
     func pad(_ s: String, _ n: Int) -> String { s.count >= n ? s : s + String(repeating: " ", count: n - s.count) }
     print(pad("envelope", 22) + "   floor GB    peak GB     act GB   declare GB")
-    for (name, images, res) in envelopes {
+    for (name, images, width, height, res) in envelopes {
         Memory.clearCache()
         Memory.peakMemory = 0
         let t = Date()
         _ = try await gen.generate(
-            prompt: "a red fox in fresh snow", images: images,
-            width: images.isEmpty ? res : nil, height: images.isEmpty ? res : nil,
+            prompt: "a red fox in fresh snow", images: images, width: width, height: height,
             outputResolution: res, steps: steps, seed: 1)
         let peak = Memory.peakMemory
         let act = max(peak - floor, 0)
@@ -453,6 +508,10 @@ do {
         } else {
             try gateDiTLarge(root: root, goldens: goldens, dtype: dtype)
         }
+    } else if has("--vae-tile") {
+        let root = URL(fileURLWithPath: arg("--vae-tile")!)
+        if has("--cpu") { try Device.withDefaultDevice(.cpu) { try vaeTileCheck(root: root) } }
+        else { try vaeTileCheck(root: root) }
     } else if has("--vae-dtype") {
         let root = URL(fileURLWithPath: arg("--vae-dtype")!)
         try vaeDTypeCheck(root: root, latentsFiles: args("--latents"))

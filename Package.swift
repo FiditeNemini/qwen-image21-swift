@@ -54,7 +54,8 @@ let package = Package(
         ),
         .executableTarget(
             name: "QwenImage21Gate",
-            dependencies: ["QwenImage21", .product(name: "MLX", package: "mlx-swift")],
+            dependencies: ["QwenImage21", .product(name: "MLX", package: "mlx-swift"),
+                           .product(name: "MLXRandom", package: "mlx-swift")],
             path: "Sources/QwenImage21Gate"
         ),
         .testTarget(

@@ -433,3 +433,24 @@ bf16 VAE, measured and NOT adopted: floor 14.91 GB, 4-ref edit 35.44 GB (−6 GB
 63.59 GB (−13%), so it does not fix the native size; decode quality 42.8–44.9 dB PSNR vs fp32 with
 0.15–0.35% of 8-bit values off by > 8 levels and outliers to 75. **2048² needs tiled decode
 (AB-T-0021) — that is the next task**, and it lifts the area cap.
+
+## 14. Halo-tiled VAE decode — native 2048² unlocked (2026-09-22, AB-R-0310, closes AB-T-0021 here)
+
+`AutoencoderKLQwenImage21.decodeTiled`: the wan-core vae22 recipe. PREFIX (conv_in, mid-block
+attention, up_blocks 0–1) runs whole on the latent grid; the local SUFFIX (up_blocks 2–4, norm_out,
+conv_out) is tiled with a halo of real neighbour pixels and cropped — no blending. Suffix receptive
+field computed first as ≈ 11.5 suffix-input px → halo 12.
+
+- **Exact:** CPU stream, halo sweep — 12 is the first bit-identical halo (max|Δ| 0.0); 11 → 1.2e-7,
+  8 → 108 dB, 0 → 27 dB with visible seams.
+- **GPU, real latents:** 64–65 dB at 1024², 66.7–67.2 dB at 2048² vs untiled.
+- **GPU, random latents — the trap:** max|Δ| 1.84 looks like a bug, but untiled GPU is equally far
+  from torch-CPU ground truth (1.906 vs 1.893 max, 2.53e-3 vs 2.52e-3 mean). Judge exactness on
+  CPU and fidelity on real latents, never on off-manifold noise on the GPU.
+- **Memory:** 2048² decode 53.6 → 17.8 GB. Whole-request T2I peaks: 2048² 42.03 GB (was 72.91),
+  2400×1792 41.60, 2752×1536 41.15 — all inside the declared 15.6 + 43.2 GB, which is unchanged.
+- **Wiring:** decodes above 1024² tile automatically (2×2 at 2048²); ≤ 1024² stays untiled and
+  parity-locked. Text-to-image now admits every model-card size (cap = largest by area,
+  2400×1792); edits stay ≤ 1024².
+
+Remaining for AB-T-0154: in-app validation + phys re-baseline; step-time headroom vs torch.

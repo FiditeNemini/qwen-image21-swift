@@ -162,8 +162,16 @@ public enum QwenImage21PackageError: Error, LocalizedError {
 /// M5 Max, fp32 VAE; AB-R-0290). `run()` refuses anything outside it so the declaration stays an
 /// upper bound.
 public enum QwenImage21Envelope {
-    /// Output area. 2048² (the model's native size) peaks at 72.9 GB, dominated by the VAE decode;
-    /// a bf16 decoder only brings that to 63.6 GB, so it needs tiled decode (AB-T-0021) to fit.
+    /// The model card's documented text-to-image sizes (1:1, 4:3, 3:4, 3:2, 2:3, 16:9, 9:16).
+    public static let documentedTextToImageSizes: [(width: Int, height: Int)] = [
+        (2048, 2048), (2400, 1792), (1792, 2400), (2528, 1696), (1696, 2528), (2752, 1536), (1536, 2752),
+    ]
+    /// Text-to-image output area cap = the LARGEST documented size by area — 2400×1792 (4,300,800 px),
+    /// not the widest one. Reachable because the pipeline decodes above 1024² in halo-exact tiles
+    /// (`AutoencoderKLQwenImage21.decodeTiled`); untiled, 2048² peaked at 72.9 GB.
+    public static let maxTextToImagePixels = documentedTextToImageSizes.map { $0.width * $0.height }.max()!
+    /// Edit output area. Each reference is resized to the output area, so larger edits grow the
+    /// prefix (KV cache ≈ 2.1 GB per 1024² reference) — not measured above 1024², so not admitted.
     public static let maxTargetPixels = 1024 * 1024
     /// Reference images: the model's documented maximum, measured at 1024² each (peak 51.6 GB).
     public static let maxReferenceImages = 10
@@ -171,10 +179,13 @@ public enum QwenImage21Envelope {
     /// nil when the request is inside the envelope, else a user-facing reason.
     public static func violation(targetWidth: Int, targetHeight: Int, referenceCount: Int,
                                  outputResolution: Int) -> String? {
-        if targetWidth * targetHeight > maxTargetPixels {
-            return "Qwen-Image-2.1: \(targetWidth)×\(targetHeight) exceeds the measured envelope "
-                + "(output area ≤ 1024²). Larger outputs peak above 70 GB in the VAE decode and need tiled "
-                + "decode, which is not implemented yet."
+        let areaCap = referenceCount == 0 ? maxTextToImagePixels : maxTargetPixels
+        if targetWidth * targetHeight > areaCap {
+            return referenceCount == 0
+                ? "Qwen-Image-2.1: \(targetWidth)×\(targetHeight) exceeds the measured text-to-image envelope "
+                    + "(output area ≤ 2400×1792, the largest size on the model card)."
+                : "Qwen-Image-2.1: an edit output of \(targetWidth)×\(targetHeight) exceeds the measured edit "
+                    + "envelope (output area ≤ 1024²)."
         }
         if referenceCount > maxReferenceImages {
             return "Qwen-Image-2.1 accepts at most \(maxReferenceImages) reference images; got \(referenceCount)."
@@ -207,7 +218,11 @@ public final class QwenImage21Package: ModelPackage {
                 //   edit 1024², 1 ref    35.03 / 19.45
                 //   edit 1024², 4 refs   41.52 / 25.94
                 //   edit 1024², 10 refs  51.57 / 35.98   ← worst inside the envelope → ×1.2 = 43.2 GB
-                //   T2I 2048²            72.91 / 57.33   ← OUTSIDE the envelope; refused by run()
+                // Text-to-image above 1024² decodes in halo-exact tiles (AB-R-0310), which is what
+                // admits the model card's sizes without raising the declaration:
+                //   T2I 2048²            42.03 / 26.45   (untiled it was 72.91 / 57.33)
+                //   T2I 2400×1792 (max)  41.60 / 26.02
+                //   T2I 2752×1536        41.15 / 25.57
                 // The envelope (QwenImage21Envelope) is enforced in run() so this stays an upper bound.
                 // MLX-pool numbers, not in-app phys_footprint — in-app re-baseline still owed.
                 footprints: [
