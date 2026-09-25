@@ -60,7 +60,12 @@ let package = Package(
         ),
         .testTarget(
             name: "QwenImage21Tests",
-            dependencies: ["QwenImage21", .product(name: "MLX", package: "mlx-swift")],
+            dependencies: [
+                "QwenImage21",
+                .product(name: "MLX", package: "mlx-swift"),
+                .product(name: "MLXNN", package: "mlx-swift"),
+                .product(name: "MLXRandom", package: "mlx-swift"),
+            ],
             path: "Tests/QwenImage21Tests"
         ),
         .testTarget(

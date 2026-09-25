@@ -57,9 +57,9 @@ public final class QwenImage21ResidualBlock: Module {
 
     public init(inDim: Int, outDim: Int) {
         self._norm1.wrappedValue = QwenImage21RMSNorm(channels: inDim)
-        self._conv1.wrappedValue = Conv2d(inputChannels: inDim, outputChannels: outDim, kernelSize: 3, padding: 1)
+        self._conv1.wrappedValue = WinogradFreeConv2d(inputChannels: inDim, outputChannels: outDim, kernelSize: 3, padding: 1)
         self._norm2.wrappedValue = QwenImage21RMSNorm(channels: outDim)
-        self._conv2.wrappedValue = Conv2d(inputChannels: outDim, outputChannels: outDim, kernelSize: 3, padding: 1)
+        self._conv2.wrappedValue = WinogradFreeConv2d(inputChannels: outDim, outputChannels: outDim, kernelSize: 3, padding: 1)
         self._convShortcut.wrappedValue = inDim != outDim
             ? Conv2d(inputChannels: inDim, outputChannels: outDim, kernelSize: 1) : nil
         super.init()
@@ -207,7 +207,7 @@ public final class QwenImage21Resample: Module {
         switch mode {
         case "upsample2d", "upsample3d":
             self._resample.wrappedValue = [
-                Conv2d(inputChannels: dim, outputChannels: upsampleOutDim ?? dim / 2, kernelSize: 3, padding: 1)
+                WinogradFreeConv2d(inputChannels: dim, outputChannels: upsampleOutDim ?? dim / 2, kernelSize: 3, padding: 1)
             ]
             self._timeConv.wrappedValue = mode == "upsample3d"
                 ? Conv2d(inputChannels: dim, outputChannels: dim * 2, kernelSize: 1) : nil
@@ -311,7 +311,7 @@ public final class QwenImage21Encoder3d: Module {
     public init(inChannels: Int = 4, dim: Int = 96, zDim: Int = 128, dimMult: [Int] = [1, 2, 4, 8, 8],
                 numResBlocks: Int = 2, temporalDownsample: [Bool] = [false, true, true, true]) {
         let dims = ([1] + dimMult).map { dim * $0 }
-        self._convIn.wrappedValue = Conv2d(inputChannels: inChannels, outputChannels: dims[0], kernelSize: 3, padding: 1)
+        self._convIn.wrappedValue = WinogradFreeConv2d(inputChannels: inChannels, outputChannels: dims[0], kernelSize: 3, padding: 1)
         var blocks: [QwenImage21ResidualDownBlock] = []
         for i in 0..<dimMult.count {
             let last = i == dimMult.count - 1
@@ -322,7 +322,7 @@ public final class QwenImage21Encoder3d: Module {
         self._downBlocks.wrappedValue = blocks
         self._midBlock.wrappedValue = QwenImage21MidBlock(dim: dims.last!)
         self._normOut.wrappedValue = QwenImage21RMSNorm(channels: dims.last!)
-        self._convOut.wrappedValue = Conv2d(inputChannels: dims.last!, outputChannels: zDim, kernelSize: 3, padding: 1)
+        self._convOut.wrappedValue = WinogradFreeConv2d(inputChannels: dims.last!, outputChannels: zDim, kernelSize: 3, padding: 1)
         super.init()
     }
 
@@ -344,7 +344,7 @@ public final class QwenImage21Decoder3d: Module {
     public init(dim: Int = 144, zDim: Int = 64, dimMult: [Int] = [1, 2, 4, 8, 8], numResBlocks: Int = 2,
                 temporalUpsample: [Bool] = [true, true, true, false], outChannels: Int = 4) {
         let dims = ([dimMult.last!] + dimMult.reversed()).map { dim * $0 }
-        self._convIn.wrappedValue = Conv2d(inputChannels: zDim, outputChannels: dims[0], kernelSize: 3, padding: 1)
+        self._convIn.wrappedValue = WinogradFreeConv2d(inputChannels: zDim, outputChannels: dims[0], kernelSize: 3, padding: 1)
         self._midBlock.wrappedValue = QwenImage21MidBlock(dim: dims[0])
         var blocks: [QwenImage21ResidualUpBlock] = []
         for i in 0..<dimMult.count {
@@ -355,7 +355,7 @@ public final class QwenImage21Decoder3d: Module {
         }
         self._upBlocks.wrappedValue = blocks
         self._normOut.wrappedValue = QwenImage21RMSNorm(channels: dims.last!)
-        self._convOut.wrappedValue = Conv2d(inputChannels: dims.last!, outputChannels: outChannels, kernelSize: 3, padding: 1)
+        self._convOut.wrappedValue = WinogradFreeConv2d(inputChannels: dims.last!, outputChannels: outChannels, kernelSize: 3, padding: 1)
         super.init()
     }
 
@@ -439,6 +439,34 @@ public final class AutoencoderKLQwenImage21: Module {
             dim: decoderBaseDim, zDim: zDim, dimMult: dimMult, numResBlocks: numResBlocks,
             temporalUpsample: Array(temporalDownsample.reversed()), outChannels: outChannels)
         super.init()
+        if let route = QwenImage21VAEConvRoute.environmentOverride {
+            encoderConvRoute = route
+            decoderConvRoute = route
+        }
+    }
+
+    /// Route for the encoder's in-window 3×3 convs (WinogradFreeConv2d.swift). Default `.conv3d`:
+    /// edit-image latents feed the DiT, and the raw Winograd loss there is material.
+    public var encoderConvRoute: QwenImage21VAEConvRoute {
+        get { Self.route(of: encoder) }
+        set { Self.setRoute(newValue, in: encoder) }
+    }
+
+    /// Route for the decoder's in-window 3×3 convs. Default `.conv3d`: unlike the RGB FLUX-class
+    /// decoders, raw Winograd here produces large, context-dependent alpha errors at transparent
+    /// edges (up to a full-range flip on a real golden), and `.conv3d` also makes the GPU
+    /// halo-tiled decode bit-identical to the untiled one. Costs +1.25 s on a ~1.6 s 1024² decode.
+    public var decoderConvRoute: QwenImage21VAEConvRoute {
+        get { Self.route(of: decoder) }
+        set { Self.setRoute(newValue, in: decoder) }
+    }
+
+    static func route(of m: Module) -> QwenImage21VAEConvRoute {
+        m.modules().lazy.compactMap { ($0 as? WinogradFreeConv2d)?.route }.first ?? .winograd
+    }
+
+    static func setRoute(_ route: QwenImage21VAEConvRoute, in m: Module) {
+        for case let conv as WinogradFreeConv2d in m.modules() { conv.route = route }
     }
 
     /// image (B, 4, 1, H, W) in [-1, 1] -> RAW latent mode (B, 64, 1, H/16, W/16)
