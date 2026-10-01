@@ -173,11 +173,10 @@ without a Python twin (mlx-porting: direct PyTorch → Swift with granular golde
 
 ## 6. Known hazards carried in
 
-- **mlx#3797 NAX split-K GEMM** (mlx-swift ≤ 0.31.6; fix mlx#3810 merged 2026-07-07, no
-  mlx-swift release since): `img_mlp.out` is K = 12288, N = 4096 → the bad window is
-  **1024 ≤ rows ≤ 4096** at half precision — i.e. the CACHED-decode pass of every 512²…1024²
-  render (rows = target tokens exactly). Row-chunked at ≤896 rows (`QI21_NO_CHUNK=1` to
-  disable). Remove when the pin vendors ≥ a8c3e9c and the fleet NAX probe passes.
+- **mlx#3797 NAX split-K GEMM** (mlx-swift ≤ 0.31.6; fixed by mlx#3810, shipped in mlx-swift
+  0.32.3): `img_mlp.out` is K = 12288, N = 4096 → the bad window was **1024 ≤ rows ≤ 4096** at
+  half precision — the CACHED-decode pass of every 512²…1024² render. It was row-chunked at ≤896
+  rows until 2026-10-01; the chunk is gone and the manifest floor is mlx-swift 0.32.3.
 - Long-graph fused-dispatch corruption family: `chainBlockGraphs` lever kept (off).
 - RNG: MLX normal ≠ torch randn; parity injects the torch noise.
 - bf16 vs fp32 timestep rounding: the reference rounds sigma to bf16 before the sinusoid.

@@ -127,41 +127,7 @@ public final class QwenImage21SwiGLUFeedForward: Module {
     }
 
     public func callAsFunction(_ x: MLXArray) -> MLXArray {
-        Self.downProjected(out, silu(gateLayer(x)) * proj(x))
-    }
-
-    /// Row-chunked down-projection — the mlx#3797 workaround (fixed upstream by mlx#3810 on
-    /// 2026-07-07, NOT yet in any mlx-swift release; latest tag is 0.31.6 from 2026-07-02).
-    ///
-    /// On mlx-swift ≤ 0.31.6 a half-precision matmul in the window
-    /// `M·N ≥ 2048² ∧ K ≥ 10240 ∧ K ≥ 3·max(M,N)` is mis-instantiated on M5-class GPUs.
-    /// Here K = 12288, N = 4096, so the window is **1024 ≤ M ≤ 4096 rows** — the cached-decode
-    /// pass of every 512²…1024² render (M = target tokens exactly). Row-chunking is exact.
-    /// Removal path: when the mlx-swift pin vendors mlx ≥ a8c3e9c, run the fleet NAX probe
-    /// (`BooguGate --nax-probe` / `NAXProbeTests`); on PASS call `out` directly.
-    /// `QI21_NO_CHUNK=1` disables it for validation.
-    static let chunkRows = 896
-
-    static func inNAXWindow(rows: Int, k: Int, n: Int) -> Bool {
-        rows * n >= 2048 * 2048 && k >= 10240 && k >= 3 * max(rows, n)
-    }
-
-    static func downProjected(_ out: Linear, _ h: MLXArray) -> MLXArray {
-        let rows = h.ndim >= 2 ? h.dim(-2) : 0
-        let k = h.dim(-1)
-        let n = out.weight.dim(0)
-        guard rows > chunkRows, h.dtype != .float32,
-            Self.inNAXWindow(rows: rows, k: k, n: n),
-            ProcessInfo.processInfo.environment["QI21_NO_CHUNK"] != "1"
-        else { return out(h) }
-        var parts: [MLXArray] = []
-        var start = 0
-        while start < rows {
-            let end = min(start + chunkRows, rows)
-            parts.append(out(h[.ellipsis, start..<end, 0...]))
-            start = end
-        }
-        return concatenated(parts, axis: -2)
+        out(silu(gateLayer(x)) * proj(x))
     }
 }
 

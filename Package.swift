@@ -19,12 +19,14 @@ let package = Package(
         .executable(name: "QwenImage21Gate", targets: ["QwenImage21Gate"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.31.4"),
-        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.31.3"),
+        // 0.32.3 carries the NAX split-K GEMM fix (mlx#3810); the FFN row-chunk was removed on that
+        // basis, so older versions would corrupt 512²–1024² renders.
+        .package(url: "https://github.com/ml-explore/mlx-swift.git", from: "0.32.3"),
+        .package(url: "https://github.com/ml-explore/mlx-swift-lm.git", from: "3.32.3"),
         .package(url: "https://github.com/huggingface/swift-transformers", from: "1.3.3"),
         // Qwen3-VL conditioner backbone (≥ 0.3.0 for lastHiddenState(applyFinalNorm:), the
         // pre-final-norm feature Qwen-Image-2.1 conditions on). Tagged 2026-09-20.
-        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.3.0"),
+        .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.4.0"),
         // MLXEngine contract (MLXToolKit) + the executable MAT/CAN gates, for the wrapper only.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.56.0"),
         .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.0"),
