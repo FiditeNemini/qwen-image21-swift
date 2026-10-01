@@ -27,11 +27,13 @@ let package = Package(
         .package(url: "https://github.com/xocialize/qwen3vl-mlx-swift", from: "0.3.0"),
         // MLXEngine contract (MLXToolKit) + the executable MAT/CAN gates, for the wrapper only.
         .package(url: "https://github.com/xocialize/mlx-engine-swift", from: "0.56.0"),
+        .package(url: "https://github.com/xocialize/mlx-exact-conv-swift", from: "0.1.0"),
     ],
     targets: [
         .target(
             name: "QwenImage21",
             dependencies: [
+                .product(name: "MLXExactConv", package: "mlx-exact-conv-swift"),
                 .product(name: "MLX", package: "mlx-swift"),
                 .product(name: "MLXNN", package: "mlx-swift"),
                 .product(name: "MLXFast", package: "mlx-swift"),
