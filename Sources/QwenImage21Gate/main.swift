@@ -488,7 +488,7 @@ do {
         let q = URL(fileURLWithPath: arg("--encoder")!)
         let goldens = URL(fileURLWithPath: cli[cli.firstIndex(of: "--encoder")! + 2])
         let tok = arg("--tokenizer").map { URL(fileURLWithPath: $0) }
-        Device.setDefault(device: Device.cpu)
+        Device.setDefault(device: Device(.cpu))  // first MLX touch in this process: pins C++ and Swift defaults
         try await gateEncoder(qwenDir: q, goldens: goldens, tokenizerDir: tok)
     } else if has("--dit") {
         let root = URL(fileURLWithPath: arg("--dit")!)
