@@ -4,17 +4,27 @@ Swift/MLX port of [Qwen/Qwen-Image-2.1](https://huggingface.co/Qwen/Qwen-Image-2
 text-to-image + multi-reference editing model: 7B single-stream block-causal DiT with a prefix KV
 cache, 64-ch 16× **RGBA** VAE (native transparency), Qwen3-VL-8B conditioner.
 
-> **Licence: Qwen RESEARCH License — research / evaluation only, no commercial use.** This port
-> is a research tier; see `PORTING-SPEC.md` §1 for the fleet posture (never allowlisted; blocked
-> under `.permissiveOnly` + `.blocking`).
+> **Licence: the Qwen-Image-2.1 weights are under the Qwen RESEARCH License Agreement — research /
+> evaluation only, no commercial use** (§1(i), §2(a); commercial use needs a separate licence from
+> Qwen, §2(b)). The Swift port code in this repository is MIT (`LICENSE`); that does not change the
+> weights' terms, and anything you generate with them is bound by the research licence. "Built with
+> Qwen".
+>
+> **Status: research / evaluation tier — not a product asset.** The `MLXQwenImage21` package declares
+> `weightLicense = LicenseRef-Qwen-Research` package-locally, and that id is never added to any
+> permissive allowlist. A `.permissiveOnly` + `.blocking` engine refuses it; an `.advisory` engine
+> registers it with a licence advisory. Consumers must not route to it by default. Use it only when
+> it is explicitly named. See `PORTING-SPEC.md` §1 and fleet decision AB-D-0085.
 
 Reference: diffusers main `QwenImage21Pipeline` (PR #14804). Spec, architecture delta vs the
 2511 port, reuse map and parity plan: `PORTING-SPEC.md`. Goldens + oracle:
 `../qwen-image21-oracle`.
 
-> Known reference-side issue: the reference pipeline's image editing degrades at its default
-> `output_resolution=1024` (512/768 are correct) — the port reproduces it faithfully, so the engine
-> wrapper defaults edits to 768². Tracked upstream: https://github.com/huggingface/diffusers/issues/14824.
+> Edit + seed: an edit that reuses the text-to-image seed and size of the image being edited
+> re-draws the generation noise and replays the generation instead of following the instruction
+> (diagnosed on https://github.com/huggingface/diffusers/issues/14824). The edit path offsets its
+> seed (`QwenImage21Latents.noiseSeed`), so edits default to the reference's 1024² again
+> (`PORTING-SPEC.md` §12).
 
 ```
 swift build
