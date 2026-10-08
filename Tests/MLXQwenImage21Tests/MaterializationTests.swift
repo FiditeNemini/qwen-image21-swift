@@ -30,6 +30,14 @@ final class QwenImage21MaterializationTests: XCTestCase {
         XCTAssertTrue(globs.contains("transformer/*"))
         XCTAssertTrue(globs.contains("vae/*"))
         XCTAssertTrue(globs.contains("*.safetensors"))
+        XCTAssertTrue(globs.contains("NOTICE"))  // Qwen Research licence §3(c) attribution travels with the weights
+    }
+
+    func testDiTSourcesFromTheControlledMirror() {
+        let sources = QwenImage21Configuration().weightSources
+        XCTAssertEqual(QwenImage21Configuration.repo, "xocialize/Qwen-Image-2.1")
+        XCTAssertTrue(sources.filter { $0.role != "text-encoder" }.allSatisfy { $0.repo == QwenImage21Configuration.repo })
+        XCTAssertEqual(QwenImage21Package.manifest.provenance.sourceRepo, QwenImage21Configuration.repo)
     }
 
     func testExplicitPathsSatisfyTheirOwnRepoOnly() {

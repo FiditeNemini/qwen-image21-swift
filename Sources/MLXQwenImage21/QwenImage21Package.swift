@@ -25,7 +25,7 @@ extension SPDXLicense {
 
 /// Init-time configuration (C9): the two snapshot roots and generation defaults.
 public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, QuantConfigured, WeightSourcing {
-    /// Qwen/Qwen-Image-2.1 root (`transformer/`, `vae/`, `processor/`, `scheduler/`). Empty = store.
+    /// Qwen-Image-2.1 root (`transformer/`, `vae/`, `processor/`, `scheduler/`). Empty = store.
     public var snapshotPath: String
     /// Qwen/Qwen3-VL-8B-Instruct root (weights + tokenizer). Empty = store.
     public var textEncoderPath: String
@@ -52,10 +52,15 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
     /// bf16 DiT + fp32 VAE — the only tier for now.
     public var quant: Quant { .bf16 }
 
-    public static let repo = "Qwen/Qwen-Image-2.1"
+    /// Fleet durability policy: the DiT / VAE / pipeline config materialise from a namespace we
+    /// control — an unmodified mirror of `upstreamRepo` at `upstreamRevision` (every file
+    /// hash-verified; `text_encoder/` omitted, see below), redistributed under Qwen Research
+    /// licence §3 with its LICENSE + NOTICE.
+    public static let repo = "xocialize/Qwen-Image-2.1"
+    public static let upstreamRepo = "Qwen/Qwen-Image-2.1"
+    public static let upstreamRevision = "b3179ad355be050328e483a9dfdd9e60cd62adfa"
     /// The 2.1 `text_encoder/` is byte-identical to this repo (750/750 tensors); we materialise
-    /// the stock snapshot instead of a second copy. ⚠ Fleet durability policy: a shipped package
-    /// must source from a namespace we control — this is a research tier and does not ship.
+    /// the stock Apache-2.0 snapshot instead of a second copy (the mirror leaves it out).
     public static let textEncoderRepo = "Qwen/Qwen3-VL-8B-Instruct"
 
     public init(
@@ -87,7 +92,7 @@ public struct QwenImage21Configuration: PackageConfiguration, ModelStorable, Qua
             WeightSource(role: "transformer", repo: Self.repo, revision: "main", matching: ["transformer/*"]),
             WeightSource(role: "vae", repo: Self.repo, revision: "main", matching: ["vae/*"]),
             WeightSource(role: "pipeline-config", repo: Self.repo, revision: "main",
-                         matching: ["model_index.json", "scheduler/*", "processor/*", "LICENSE"]),
+                         matching: ["model_index.json", "scheduler/*", "processor/*", "LICENSE", "NOTICE"]),
             WeightSource(role: "text-encoder", repo: Self.textEncoderRepo, revision: "main",
                          matching: ["*.safetensors", "*.json", "merges.txt"]),
         ]
@@ -208,7 +213,9 @@ public final class QwenImage21Package: ModelPackage {
             // so `.permissiveOnly` refuses or flags this package by construction (AB-D-0085).
             // C8: port code MIT.
             license: LicenseDeclaration(weightLicense: .qwenResearch, portCodeLicense: .mit),
-            provenance: Provenance(sourceRepo: "Qwen/Qwen-Image-2.1", revision: "main", tier: 3),
+            // Provenance names the controlled mirror (durability policy); its card pins the upstream
+            // revision (`Configuration.upstreamRevision`).
+            provenance: Provenance(sourceRepo: "xocialize/Qwen-Image-2.1", revision: "main", tier: 3),
             requirements: RequirementsManifest(
                 // MEASURED split (QwenImage21Gate --membench, M5 Max, AB-R-0290). Resident floor =
                 // DiT bf16 + VAE fp32 after load, cache cleared: 15.58 GB. The Qwen3-VL-8B encoder

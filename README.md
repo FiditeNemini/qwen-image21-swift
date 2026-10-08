@@ -38,7 +38,10 @@ swift build
 
 Weights: `transformer/` + `vae/` + `processor/` + `scheduler/` from the 2.1 repo
 (`weights/Qwen-Image-2.1`); the text encoder is byte-identical to `Qwen/Qwen3-VL-8B-Instruct`
-and is loaded from that snapshot.
+and is loaded from that snapshot. On a fresh machine the engine materialises the 2.1 part from
+[`xocialize/Qwen-Image-2.1`](https://huggingface.co/xocialize/Qwen-Image-2.1). That repo is an
+unmodified, hash-verified mirror of `Qwen/Qwen-Image-2.1` at `b3179ad`, shipped with the Qwen
+Research LICENSE and NOTICE and without `text_encoder/`.
 
 ## GPU numerics: the VAE's 3×3 convs (2026-09-24)
 
